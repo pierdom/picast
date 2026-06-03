@@ -70,7 +70,8 @@ class Renderer:
         self._console: Console | None = None
         self._console_size: tuple[int, int] = (0, 0)
         self._last_cover: bytes | None = None
-        self._image_lines: list[str] = []
+        self._image_lines: list[str] = []       # protocol overlay (written after frame)
+        self._half_block_lines: list[str] = []  # half-block art (embedded in right panel)
 
     def _get_console(self, cols: int, rows: int) -> Console:
         if (cols, rows) != self._console_size:
@@ -148,6 +149,24 @@ class Renderer:
             padding=(0, 1),
         )
 
+        # ── image cache: recompute only when cover changes ────────────────────
+        if state.cover_image_bytes is not self._last_cover:
+            self._last_cover = state.cover_image_bytes
+            if state.cover_image_bytes:
+                self._half_block_lines = img_mod.render_half_block_lines(
+                    state.cover_image_bytes, IMAGE_COLS, IMAGE_ROWS
+                )
+                self._image_lines = (
+                    img_mod.render_frame_lines(
+                        state.cover_image_bytes, IMAGE_COLS, IMAGE_ROWS
+                    )
+                    if img_mod.protocol_name() != "block"
+                    else []
+                )
+            else:
+                self._half_block_lines = []
+                self._image_lines = []
+
         # ── right panel (cover art + podcast detail) ──────────────────────────
         is_following = (
             state.selected_podcast is not None
@@ -155,7 +174,7 @@ class Renderer:
         )
         right_content = panels.detail_content(
             state.selected_podcast,
-            state.cover_image_bytes,
+            self._half_block_lines,
             IMAGE_COLS,
             IMAGE_ROWS,
             is_following=is_following,
@@ -272,19 +291,13 @@ class Renderer:
         #   img_col = left_allocated + gap(1) + right-border(1) + right-padding(1) + 1-indexed
         #           = left_allocated + 4
         image_overlay = ""
-        if img_mod.protocol_name() != "block" and state.cover_image_bytes:
-            if state.cover_image_bytes is not self._last_cover:
-                self._last_cover = state.cover_image_bytes
-                self._image_lines = img_mod.render_frame_lines(
-                    state.cover_image_bytes, IMAGE_COLS, IMAGE_ROWS
-                )
-            if self._image_lines:
-                img_row = HEADER_HEIGHT + 2
-                img_col = left_allocated + 4
-                parts = []
-                for i, line in enumerate(self._image_lines):
-                    parts.append(f"\033[{img_row + i};{img_col}H{line}")
-                image_overlay = "".join(parts)
+        if self._image_lines:
+            img_row = HEADER_HEIGHT + 2
+            img_col = left_allocated + 4
+            parts = []
+            for i, line in enumerate(self._image_lines):
+                parts.append(f"\033[{img_row + i};{img_col}H{line}")
+            image_overlay = "".join(parts)
 
         # ── write frame + overlay atomically ──────────────────────────────────
         sys.stdout.write("\033[2J\033[H\033[?25l" + frame + image_overlay)

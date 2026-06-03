@@ -8,7 +8,6 @@ from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 
-from picast import image as img_mod
 from picast.ui.theme import (
     ACCENT,
     ACCENT_DIM,
@@ -203,7 +202,7 @@ def episode_list_content(
 
 def detail_content(
     podcast: dict | None,
-    image_bytes: bytes | None,
+    image_lines: list[str],
     image_cols: int,
     image_rows: int,
     is_following: bool = False,
@@ -211,9 +210,8 @@ def detail_content(
 ) -> Group:
     lines: list[object] = []
 
-    if image_bytes:
-        raw_lines = img_mod.render_half_block_lines(image_bytes, image_cols, image_rows)
-        for raw in raw_lines:
+    if image_lines:
+        for raw in image_lines:
             lines.append(Text.from_ansi(raw))
     else:
         for _ in range(image_rows):

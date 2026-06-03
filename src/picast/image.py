@@ -117,7 +117,7 @@ def _capture_protocol(image_bytes: bytes, cols: int, rows: int) -> str:
     try:
         pil_img = PILImage.open(BytesIO(image_bytes))
         img = _ImageClass(pil_img)  # type: ignore[call-arg]
-        img.width = cols
+        img.set_size(cols, rows)   # pin to exact cell area; no aspect-ratio drift
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             img.draw()
