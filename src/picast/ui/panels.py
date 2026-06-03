@@ -11,6 +11,7 @@ from rich.text import Text
 from picast import image as img_mod
 from picast.ui.theme import (
     ACCENT,
+    ACCENT_DIM,
     BG_SELECT,
     BORDER_COLOR,
     DONE_COLOR,
@@ -68,21 +69,20 @@ def podcast_list_content(
     table.add_column(width=1)
     table.add_column(max_width=width - 2, no_wrap=True)
 
-    # Build a flat display list interleaving section headers with podcast rows.
-    # Each entry: ("header", label, style) or ("podcast", podcast_dict, logical_idx)
+    # Build a flat display list.
+    # Kinds: "following_header" | "spacer" | "trending_header" | "podcast"
     display: list[tuple] = []
-    has_following = following_count > 0 and len(podcasts) >= following_count
-    has_trending = len(podcasts) > following_count
 
-    if has_following:
-        display.append(("header", "Following", Style(color=ACCENT, bold=True)))
-        for li in range(following_count):
+    if following_count > 0 and len(podcasts) > 0:
+        display.append(("following_header", None, -1))
+        for li in range(min(following_count, len(podcasts))):
             display.append(("podcast", podcasts[li], li))
-    if has_trending:
-        display.append(("header", "Trending", Style(color=FG_DIM, italic=True)))
-        for li in range(following_count, len(podcasts)):
-            display.append(("podcast", podcasts[li], li))
-    if not display:
+        if len(podcasts) > following_count:
+            display.append(("spacer", None, -1))
+            display.append(("trending_header", None, -1))
+            for li in range(following_count, len(podcasts)):
+                display.append(("podcast", podcasts[li], li))
+    else:
         for li, p in enumerate(podcasts):
             display.append(("podcast", p, li))
 
@@ -90,7 +90,7 @@ def podcast_list_content(
         table.add_row("", Text("No podcasts", style=Style(color=FG_DIM, italic=True)))
         return table
 
-    # Find the visual index of the cursor so we can center the window on it.
+    # Find the visual index of the cursor to centre the scroll window on it.
     visual_cursor = 0
     for vi, entry in enumerate(display):
         if entry[0] == "podcast" and entry[2] == cursor:
@@ -100,13 +100,34 @@ def podcast_list_content(
     visual_start = max(0, visual_cursor - height // 2)
     visible = display[visual_start: visual_start + height]
 
+    title_w = max(0, width - 2)  # characters available in the title column
+
     for entry in visible:
-        if entry[0] == "header":
-            _, label, hstyle = entry
-            icon = FOLLOW_ICON if label == "Following" else " "
-            icon_style = Style(color=ACCENT, bold=True) if label == "Following" else Style()
-            table.add_row(Text(icon, style=icon_style), Text(label, style=hstyle))
-        else:
+        kind = entry[0]
+
+        if kind == "following_header":
+            # Rule-style header: "★  Following ──────────────────────"
+            label = " Following"
+            dashes = "─" * max(0, title_w - len(label))
+            t = Text(no_wrap=True)
+            t.append(label, style=Style(color=ACCENT, bold=True))
+            t.append(dashes, style=Style(color=ACCENT_DIM))
+            table.add_row(Text("★", style=Style(color=ACCENT, bold=True)), t)
+
+        elif kind == "spacer":
+            table.add_row(Text(""), Text(""))
+
+        elif kind == "trending_header":
+            # Centred rule: "──────── Trending ──────────────────"
+            label = " Trending "
+            n = max(0, title_w - len(label))
+            t = Text(no_wrap=True)
+            t.append("─" * (n // 2), style=Style(color=FG_DIM))
+            t.append(label, style=Style(color=FG_DIM, italic=True))
+            t.append("─" * (n - n // 2), style=Style(color=FG_DIM))
+            table.add_row(Text(""), t)
+
+        else:  # podcast
             _, p, li = entry
             is_selected = li == cursor
             feed_id = p.get("id", 0)
