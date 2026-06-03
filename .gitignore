@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+dist/
+build/
+*.egg-info/
+
+# uv
+.uv/
+
+# Config / user data (kept locally, never committed)
+~/.config/picast/
+~/.local/share/picast/
+
+# Editor
+.DS_Store
+.idea/
+.vscode/
