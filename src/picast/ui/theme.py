@@ -11,6 +11,7 @@ SUCCESS = "#4ade80"
 WARNING = "#facc15"
 DANGER = "#f87171"
 BORDER_COLOR = "#334155"
+DETAIL_BORDER = "#1d4ed8"   # blue for the detail/right panel
 PLAYING_COLOR = "#c084fc"
 NEW_COLOR = "#38bdf8"
 STARTED_COLOR = "#facc15"

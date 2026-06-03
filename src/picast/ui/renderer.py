@@ -1,13 +1,13 @@
-"""Screen renderer.
+"""Screen renderer — btop-inspired layout.
 
-One outer Panel with a Table inside — avoids the double-border that two
-adjacent Panels create. Image is embedded as half-block art in the layout;
-for graphics-protocol terminals it is also overlaid via cursor positioning
-(covering the half-block art with a higher-quality render).
+Two ROUNDED panels side by side (left = list, right = details) with a
+1-column gap between them, giving the ╮ ╭ junction btop uses. Below
+them sits a ROUNDED player panel whose border colour reacts to playback
+state. A thin header bar runs across the top.
 
-Scroll prevention: we lock the scroll region to the terminal height in
-enter_screen() so the alternate-screen buffer never scrolls, which would
-otherwise shift absolute cursor coordinates and put the image in the wrong row.
+Image rendering: half-block art is embedded in the right panel content;
+for Kitty/iTerm2/Sixel terminals an escape-code overlay is written over
+the same cell area after the frame for higher quality.
 """
 from __future__ import annotations
 
@@ -16,12 +16,10 @@ import sys
 from dataclasses import dataclass, field
 
 from rich import box as richbox
-from rich.console import Console
+from rich.console import Console, Group
 from rich.layout import Layout
 from rich.panel import Panel
-from rich.rule import Rule
 from rich.style import Style
-from rich.table import Table
 from rich.text import Text
 
 from picast import image as img_mod
@@ -31,12 +29,12 @@ from picast.ui import panels, theme
 IMAGE_COLS = 22
 IMAGE_ROWS = 11   # half-block: 2 px/row → 22×22 px block
 
-# Column split
+# Column split ratios
 LEFT_RATIO = 2
 RIGHT_RATIO = 3
 
 HEADER_HEIGHT = 1
-FOOTER_HEIGHT = 3   # rule + player line + hints line
+PLAYER_HEIGHT = 4   # ╭border╮ + player_line + hints_line + ╰border╯
 
 
 @dataclass
@@ -106,28 +104,26 @@ class Renderer:
         except OSError:
             cols, rows = 80, 24
 
-        if cols < 40 or rows < 10:
+        if cols < 40 or rows < 12:
             return
 
         console = self._get_console(cols, rows)
-        main_height = max(4, rows - HEADER_HEIGHT - FOOTER_HEIGHT)
+        main_height = max(6, rows - HEADER_HEIGHT - PLAYER_HEIGHT)
 
-        # Left column inner width:
-        #   total left region = cols * 2/5
-        #   minus outer Panel border (1 each side) + Table padding (1 each side) = 4
-        left_region = cols * LEFT_RATIO // (LEFT_RATIO + RIGHT_RATIO)
-        left_inner = left_region - 4   # for content column of the table
+        # left_allocated: columns given to the left Layout section (includes panel borders).
+        # A 1-column gap sits between the two panels → subtract 1 from available width.
+        left_allocated = (cols - 1) * LEFT_RATIO // (LEFT_RATIO + RIGHT_RATIO)
+        left_inner = left_allocated - 4   # ROUNDED borders(2) + padding each side(2)
+        list_height = main_height - 2    # ROUNDED panel top + bottom borders
 
-        list_height = main_height - 2  # Panel top + bottom border
-
-        # ── left column content (podcast or episode list) ─────────────────────
+        # ── left panel (podcast / episode list) ───────────────────────────────
         if state.view in ("home", "following"):
             if state.view == "following":
-                list_title = "Following"
+                list_panel_title = f"[bold {theme.ACCENT}]★ Following[/]"
             elif state.following_count > 0:
-                list_title = "Podcasts"
+                list_panel_title = f"[bold {theme.ACCENT}]★ Podcasts[/]"
             else:
-                list_title = "Trending"
+                list_panel_title = f"[{theme.FG_DIM}]Trending[/]"
             left_content = panels.podcast_list_content(
                 state.podcasts, state.podcast_cursor, state.following_ids,
                 playing_feed_id=None, height=list_height, width=left_inner,
@@ -137,16 +133,22 @@ class Renderer:
             playing_ep_id = (
                 state.now_playing_episode.get("id") if state.now_playing_episode else None
             )
-            list_title = (
-                state.selected_podcast.get("title", "Episodes")
-                if state.selected_podcast else "Episodes"
-            )
+            list_panel_title = f"[bold {theme.ACCENT}]◎ Episodes[/]"
             left_content = panels.episode_list_content(
                 state.episodes, state.episode_cursor, state.episode_statuses,
                 playing_episode_id=playing_ep_id, height=list_height,
             )
 
-        # ── right column content (image + detail text) ────────────────────────
+        left_panel = Panel(
+            left_content,
+            title=list_panel_title,
+            title_align="left",
+            border_style=theme.ACCENT_DIM,
+            box=richbox.ROUNDED,
+            padding=(0, 1),
+        )
+
+        # ── right panel (cover art + podcast detail) ──────────────────────────
         is_following = (
             state.selected_podcast is not None
             and state.selected_podcast.get("id", 0) in state.following_ids
@@ -159,42 +161,25 @@ class Renderer:
             is_following=is_following,
             loading=state.loading,
         )
-
-        # ── main panel: ONE Panel wrapping a 2-column Table ───────────────────
-        tbl = Table(
-            box=richbox.SIMPLE,   # gives "│" between columns, no outer lines
-            padding=(0, 1),
-            show_header=True,
-            header_style=f"bold {theme.FG_DIM}",
-            expand=True,
-        )
-        tbl.add_column(list_title, width=left_inner, no_wrap=True)
-        tbl.add_column("Details")
-        tbl.add_row(left_content, right_content)
-
-        main_panel = Panel(tbl, border_style=theme.BORDER_COLOR, padding=0)
-
-        # ── header ────────────────────────────────────────────────────────────
-        header = Text(no_wrap=True)
-        header.append("  ▶ picast", style=Style(color="#c084fc", bold=True))
-        if state.view == "following":
-            header.append("  Following", style=Style(color=theme.FG_DIM))
-        elif state.view == "podcast" and state.selected_podcast:
-            header.append(
-                f"  {state.selected_podcast.get('title', '')}",
-                style=Style(color=theme.FG_DIM, italic=True),
-            )
+        if state.selected_podcast:
+            pod_name = state.selected_podcast.get("title", "")
+            if len(pod_name) > 42:
+                pod_name = pod_name[:39] + "…"
+            detail_panel_title = f"[bold {theme.FG}]{pod_name}[/]"
         else:
-            header.append("  Trending", style=Style(color=theme.FG_DIM))
-        proto = img_mod.protocol_name()
-        if proto != "block":
-            header.append(f"  [{proto}]", style=Style(color=theme.FG_DIM))
-        if state.status:
-            header.append(f"  {state.status}", style=Style(color=theme.WARNING))
+            detail_panel_title = f"[{theme.FG_DIM}]Details[/]"
 
-        # ── footer ────────────────────────────────────────────────────────────
-        rule = Rule(style=Style(color=theme.BORDER_COLOR))
-        player = panels.player_line(
+        right_panel = Panel(
+            right_content,
+            title=detail_panel_title,
+            title_align="left",
+            border_style=theme.DETAIL_BORDER,
+            box=richbox.ROUNDED,
+            padding=(0, 1),
+        )
+
+        # ── player panel (playback + hints; border changes with state) ────────
+        player_line = panels.player_line(
             state.now_playing_episode,
             state.now_playing_podcast_title,
             state.playback_position,
@@ -204,44 +189,88 @@ class Renderer:
         )
         hints = panels.hints_line(search_mode=state.search_mode, query=state.search_query)
 
-        # ── layout ────────────────────────────────────────────────────────────
+        if state.now_playing_episode:
+            if state.is_playing:
+                player_border = theme.PLAYING_COLOR
+                player_title = f"[bold {theme.PLAYING_COLOR}]▶ Now Playing[/]"
+            else:
+                player_border = theme.ACCENT_DIM
+                player_title = f"[bold {theme.ACCENT_DIM}]⏸ Paused[/]"
+        else:
+            player_border = theme.BORDER_COLOR
+            player_title = f"[{theme.FG_DIM}]Player[/]"
+
+        player_panel = Panel(
+            Group(player_line, hints),
+            title=player_title,
+            title_align="left",
+            border_style=player_border,
+            box=richbox.ROUNDED,
+            padding=(0, 1),
+        )
+
+        # ── header bar ────────────────────────────────────────────────────────
+        header = Text(no_wrap=True)
+        badge = Style(bold=True, color="#ffffff", bgcolor=theme.ACCENT_DIM)
+        header.append(" ▶ picast ", style=badge)
+        header.append("  ", style=Style())
+
+        if state.view == "following":
+            header.append("Following", style=Style(color=theme.ACCENT, bold=True))
+        elif state.view == "podcast" and state.selected_podcast:
+            header.append(
+                state.selected_podcast.get("title", "")[:50],
+                style=Style(color=theme.FG_DIM, italic=True),
+            )
+        elif state.following_count > 0:
+            header.append("Podcasts", style=Style(color=theme.FG_DIM))
+        else:
+            header.append("Trending", style=Style(color=theme.FG_DIM))
+
+        if state.now_playing_episode:
+            ep_icon = theme.PLAYING_ICON if state.is_playing else theme.PAUSED_ICON
+            ep_title = state.now_playing_episode.get("title", "")[:45]
+            header.append("   │   ", style=Style(color=theme.BORDER_COLOR))
+            header.append(f"{ep_icon} ", style=Style(color=theme.PLAYING_COLOR, bold=True))
+            header.append(ep_title, style=Style(color=theme.FG_DIM))
+
+        proto = img_mod.protocol_name()
+        if proto != "block":
+            header.append(f"  [{proto}]", style=Style(color=theme.FG_DIM))
+        if state.status:
+            header.append(f"  {state.status}", style=Style(color=theme.WARNING))
+
+        # ── assemble layout ───────────────────────────────────────────────────
         layout = Layout()
         layout.split_column(
             Layout(name="header", size=HEADER_HEIGHT),
             Layout(name="main", size=main_height),
-            Layout(name="footer", size=FOOTER_HEIGHT),
+            Layout(name="player", size=PLAYER_HEIGHT),
         )
-        layout["footer"].split_column(
-            Layout(name="rule", size=1),
-            Layout(name="player", size=1),
-            Layout(name="hints", size=1),
+        layout["main"].split_row(
+            Layout(name="left", ratio=LEFT_RATIO),
+            Layout(name="gap", size=1),
+            Layout(name="right", ratio=RIGHT_RATIO),
         )
+
         layout["header"].update(header)
-        layout["main"].update(main_panel)
-        layout["rule"].update(rule)
-        layout["player"].update(player)
-        layout["hints"].update(hints)
+        layout["left"].update(left_panel)
+        layout["gap"].update(Text(""))
+        layout["right"].update(right_panel)
+        layout["player"].update(player_panel)
 
         # ── capture to string and write atomically ────────────────────────────
         with console.capture() as cap:
             console.print(layout, end="")
-        frame = cap.get()
-        # Clip to `rows` lines and join with \r\n.
-        # tty.setraw() disables ONLCR so bare \n is LF-only (no CR); each line would
-        # start at the column where the previous line ended rather than column 1.
-        # Using \r\n guarantees column-1 resets in raw mode.
-        # split() on a \n-terminated string produces a trailing empty element;
-        # taking [:rows] and joining gives rows-1 \r\n pairs → cursor stays on row rows.
-        frame = "\r\n".join(frame.split("\n")[:rows])
+        # \r\n: tty.setraw() disables ONLCR so bare \n is LF-only; \r\n guarantees
+        # column-1 reset. Clip to rows lines so cursor never advances past last row.
+        frame = "\r\n".join(cap.get().split("\n")[:rows])
 
         # ── protocol image overlay ────────────────────────────────────────────
-        # For protocol images (Kitty/iTerm2/Sixel) the half-block art already in
-        # the layout is replaced by a higher-quality overlay at the same position.
-        #
-        # Position inside the ONE Panel + Table layout:
-        #   Row: header(1) + panel-border(1) + table-header(1) + separator(1) + 1-indexed = 5
-        #   Col: panel-border(1) + left-pad(1) + left_inner + table-sep(3) + right-pad(1) + 1-idx
-        #      = left_inner + 7 = (left_region - 4) + 7 = left_region + 3
+        # Layout: header(1) │ main: [left_allocated | gap(1) | right] │ player(4)
+        #   img_row = header(1) + right-panel-top-border(1) + 1-indexed = HEADER_HEIGHT + 2
+        #   img_col = left_allocated + gap(1) + right-border(1) + right-padding(1) + 1-indexed
+        #           = left_allocated + 4
         image_overlay = ""
         if img_mod.protocol_name() != "block" and state.cover_image_bytes:
             if state.cover_image_bytes is not self._last_cover:
@@ -250,13 +279,13 @@ class Renderer:
                     state.cover_image_bytes, IMAGE_COLS, IMAGE_ROWS
                 )
             if self._image_lines:
-                img_row = 5                  # header + panel-border + table-header + separator
-                img_col = left_region + 3   # see comment above
+                img_row = HEADER_HEIGHT + 2
+                img_col = left_allocated + 4
                 parts = []
                 for i, line in enumerate(self._image_lines):
                     parts.append(f"\033[{img_row + i};{img_col}H{line}")
                 image_overlay = "".join(parts)
 
-        # ── write everything atomically ───────────────────────────────────────
+        # ── write frame + overlay atomically ──────────────────────────────────
         sys.stdout.write("\033[2J\033[H\033[?25l" + frame + image_overlay)
         sys.stdout.flush()
