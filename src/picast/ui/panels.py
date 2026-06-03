@@ -294,8 +294,8 @@ def hints_line(search_mode: bool = False, query: str = "") -> Text:
         t.append("  Enter=search  Esc=cancel", style=Style(color=FG_DIM))
     else:
         t.append(
-            "  j/k navigate · Enter select · Space play · ←→ seek · / search"
-            " · f follow · Tab toggle · q quit",
+            "  j/k navigate · Enter episodes · p play latest · Space play"
+            " · ←→ seek · / search · f follow · Tab toggle · q quit",
             style=Style(color=FG_DIM),
         )
     return t

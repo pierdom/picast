@@ -138,6 +138,11 @@ class App:
             case k if k == "/":
                 self.state.search_mode = True
                 self.state.search_query = ""
+            case k if k == "p":
+                if self.state.view in ("home", "following") and self.state.selected_podcast:
+                    asyncio.ensure_future(
+                        self._play_latest(self.state.selected_podcast)
+                    )
             case k if k == "f":
                 self._handle_follow()
             case k if k == "F":
@@ -340,7 +345,27 @@ class App:
         finally:
             self.state.loading = False
 
-    def _play_episode(self, episode: dict) -> None:
+    async def _play_latest(self, podcast: dict) -> None:
+        """Fetch the latest episode of podcast and start playback immediately."""
+        if not self._api:
+            return
+        feed_id = podcast.get("id", 0)
+        podcast_title = podcast.get("title", "")  # capture before await
+        self.state.status = "Loading…"
+        try:
+            episodes = await self._api.episodes(feed_id, max=1)
+            if not episodes:
+                self.state.status = "No episodes"
+                await self._clear_status()
+                return
+            self._play_episode(episodes[0], podcast_title=podcast_title)
+        except Exception as exc:
+            self.state.status = f"Error: {exc}"
+            await self._clear_status()
+        else:
+            self.state.status = ""
+
+    def _play_episode(self, episode: dict, podcast_title: str | None = None) -> None:
         ep_id = episode.get("id", 0)
         url = episode.get("enclosureUrl", "")
         if not url:
@@ -350,9 +375,12 @@ class App:
         start_pos = store.episode_position(ep_id)
         self.player.play(url, episode_id=ep_id, start_pos=start_pos)
         self.state.now_playing_episode = episode
-        self.state.now_playing_podcast_title = (
-            self.state.selected_podcast.get("title", "") if self.state.selected_podcast else ""
-        )
+        if podcast_title is not None:
+            self.state.now_playing_podcast_title = podcast_title
+        elif self.state.selected_podcast:
+            self.state.now_playing_podcast_title = self.state.selected_podcast.get("title", "")
+        else:
+            self.state.now_playing_podcast_title = ""
         self.state.is_playing = True
         self.state.playback_position = start_pos
         self.state.playback_duration = episode.get("duration", 0) or 0.0
