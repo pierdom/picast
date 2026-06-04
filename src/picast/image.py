@@ -24,7 +24,7 @@ _KITTY_TERMS = {"xterm-kitty", "xterm-ghostty"}
 _KITTY_PROGRAMS = {"WezTerm", "ghostty"}
 _ITERM2_PROGRAMS = {"iTerm.app"}
 
-_KITTY_IMG_ID = 1  # fixed ID for the cover image slot
+_KITTY_IMG_ID = 1  # default Kitty image ID (kept for API compat)
 
 
 def _detect() -> None:
@@ -54,16 +54,19 @@ def protocol_name() -> str:
 
 # ── public API ────────────────────────────────────────────────────────────────
 
-def render_frame_lines(image_bytes: bytes, cols: int, rows: int) -> list[str]:
+def render_frame_lines(
+    image_bytes: bytes, cols: int, rows: int, kitty_id: int = _KITTY_IMG_ID
+) -> list[str]:
     """Return escape-code lines for the active protocol, or [] to signal fallback.
 
     For Kitty/iTerm2 returns a single-element list containing the full sequence.
     The renderer positions the cursor before writing it as an overlay.
+    kitty_id lets callers use separate Kitty image slots (e.g. one per card).
     """
     if not image_bytes:
         return []
     if _protocol == "kitty":
-        seq = _render_kitty(image_bytes, cols, rows)
+        seq = _render_kitty(image_bytes, cols, rows, kitty_id)
         if seq:
             return [seq]
     elif _protocol == "iterm2":
@@ -107,20 +110,20 @@ def _to_png(image_bytes: bytes, px: int = 256) -> bytes:
     return buf.getvalue()
 
 
-def kitty_redisplay(cols: int, rows: int) -> str:
+def kitty_redisplay(cols: int, rows: int, kitty_id: int = _KITTY_IMG_ID) -> str:
     """Re-place an already-transmitted Kitty image (no data transfer)."""
-    return f"\033_Ga=p,q=2,i={_KITTY_IMG_ID},c={cols},r={rows}\033\\"
+    return f"\033_Ga=p,q=2,i={kitty_id},c={cols},r={rows}\033\\"
 
 
-def kitty_delete() -> str:
-    """Delete the Kitty cover image from terminal cache."""
-    return f"\033_Ga=d,q=2,i={_KITTY_IMG_ID}\033\\"
+def kitty_delete(kitty_id: int = _KITTY_IMG_ID) -> str:
+    """Delete a Kitty image from terminal cache by ID."""
+    return f"\033_Ga=d,q=2,i={kitty_id}\033\\"
 
 
-def _render_kitty(image_bytes: bytes, cols: int, rows: int) -> str:
+def _render_kitty(image_bytes: bytes, cols: int, rows: int, kitty_id: int = _KITTY_IMG_ID) -> str:
     """Kitty terminal graphics protocol — APC escape (ESC_G...ESC\\).
 
-    Transmits the image with a fixed ID so subsequent frames can use
+    Transmits the image with the given ID so subsequent frames can use
     kitty_redisplay() instead of retransmitting the full PNG data.
     """
     try:
@@ -134,7 +137,7 @@ def _render_kitty(image_bytes: bytes, cols: int, rows: int) -> str:
             if i == 0:
                 # a=T transmit+display  f=100 PNG  q=2 quiet  i=ID  c/r cell dims
                 parts.append(
-                    f"\033_Ga=T,f=100,q=2,i={_KITTY_IMG_ID},c={cols},r={rows},m={m};{chunk}\033\\"
+                    f"\033_Ga=T,f=100,q=2,i={kitty_id},c={cols},r={rows},m={m};{chunk}\033\\"
                 )
             else:
                 parts.append(f"\033_Gm={m};{chunk}\033\\")

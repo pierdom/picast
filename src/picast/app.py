@@ -109,7 +109,7 @@ class App:
             await asyncio.sleep(0.5)
 
     async def _initial_load(self) -> None:
-        await self._load_trending()
+        await self._load_following_home()
 
     # ── key handling ──────────────────────────────────────────────────────────
 
@@ -139,7 +139,7 @@ class App:
                 self.state.search_mode = True
                 self.state.search_query = ""
             case k if k == "p":
-                if self.state.view in ("home", "following") and self.state.selected_podcast:
+                if self.state.selected_podcast:
                     asyncio.ensure_future(
                         self._play_latest(self.state.selected_podcast)
                     )
@@ -150,12 +150,15 @@ class App:
             case k if k == ESCAPE or k == "h":
                 await self._go_back()
             case k if k == TAB:
-                # Toggle between home and following
-                if self.state.view in ("home", "following"):
-                    if self.state.view == "home":
-                        await self._show_following()
+                # Toggle between following and home
+                if self.state.view in ("home", "search", "following"):
+                    if self.state.view == "following":
+                        await self._load_following_home()
                     else:
-                        await self._load_trending()
+                        await self._show_following()
+                elif self.state.view == "podcast":
+                    # Tab in episode view goes back to card grid
+                    await self._go_back()
 
     async def _handle_search_key(self, key: str) -> None:
         if key == ESCAPE:
@@ -174,7 +177,7 @@ class App:
     # ── navigation actions ────────────────────────────────────────────────────
 
     def _move_cursor(self, delta: int) -> None:
-        if self.state.view in ("home", "following"):
+        if self.state.view in ("home", "following", "search"):
             n = len(self.state.podcasts)
             if n:
                 self.state.podcast_cursor = max(0, min(n - 1, self.state.podcast_cursor + delta))
@@ -185,24 +188,46 @@ class App:
                 self.state.episode_cursor = max(0, min(n - 1, self.state.episode_cursor + delta))
 
     async def _on_podcast_cursor_change(self) -> None:
-        """Load details for highlighted podcast (non-blocking)."""
+        """Auto-load episodes for the highlighted podcast (debounced)."""
         if not self.state.podcasts:
             return
         p = self.state.podcasts[self.state.podcast_cursor]
-        if self.state.selected_podcast and self.state.selected_podcast.get("id") == p.get("id"):
+        pid = p.get("id", 0)
+        if self.state.selected_podcast and self.state.selected_podcast.get("id") == pid:
             return
         self.state.selected_podcast = p
-        self.state.cover_image_bytes = None
-        url = p.get("artwork", "") or p.get("image", "")
-        if url and self._api:
-            self.state.cover_image_bytes = await self._api.fetch_image(url)
+
+        # Cancel any pending episode fetch
+        if self._pending_fetch:
+            self._pending_fetch.cancel()
+            self._pending_fetch = None
+
+        # Fetch image if not already cached
+        if pid not in self.state.cover_images and self._api:
+            url = p.get("artwork", "") or p.get("image", "")
+            if url:
+                asyncio.ensure_future(self._fetch_image_for(pid, url))
+
+        # Debounced episode load
+        self._pending_fetch = asyncio.ensure_future(
+            self._load_episodes_debounced(p, pid)
+        )
 
     async def _handle_enter(self) -> None:
-        if self.state.view in ("home", "following"):
+        if self.state.view in ("home", "following", "search"):
             if not self.state.podcasts:
                 return
+            # Focus the right panel (episode list)
+            self.state.view = "podcast"
+            self.state.episode_cursor = 0
+            # If episodes not yet loaded for this podcast, trigger load now
             p = self.state.podcasts[self.state.podcast_cursor]
-            await self._open_podcast(p)
+            pid = p.get("id", 0)
+            if self.state.episodes_for_pod != pid:
+                self.state.episodes = []
+                self.state.episodes_for_pod = pid
+                if self._api:
+                    asyncio.ensure_future(self._load_episodes_now(p, pid))
         elif self.state.view == "podcast":
             if not self.state.episodes:
                 return
@@ -227,23 +252,7 @@ class App:
             store.follow(p)
             self.state.following_ids.add(fid)
             self.state.status = f"Following {p.get('title', '')}"
-        if self.state.view == "home":
-            self._reorder_home_list()
         asyncio.ensure_future(self._clear_status())
-
-    def _reorder_home_list(self) -> None:
-        """Re-sort home list: followed podcasts first, trending after. Keeps cursor on same item."""
-        sel_id = self.state.selected_podcast.get("id", 0) if self.state.selected_podcast else None
-        fids = self.state.following_ids
-        following_pods = [p for p in self.state.podcasts if p.get("id", 0) in fids]
-        trending_pods = [p for p in self.state.podcasts if p.get("id", 0) not in fids]
-        self.state.podcasts = following_pods + trending_pods
-        self.state.following_count = len(following_pods)
-        if sel_id is not None:
-            for i, p in enumerate(self.state.podcasts):
-                if p.get("id", 0) == sel_id:
-                    self.state.podcast_cursor = i
-                    break
 
     async def _clear_status(self) -> None:
         await asyncio.sleep(2)
@@ -251,47 +260,121 @@ class App:
 
     async def _go_back(self) -> None:
         if self.state.view == "podcast":
+            # Return to card grid without clearing episodes (smooth UX)
             self.state.view = "home"
-            self.state.episodes = []
-            self.state.episode_cursor = 0
-            await self._load_trending()
 
     async def _show_following(self) -> None:
         follows = store.get_follows()
         self.state.podcasts = list(follows.values())
         self.state.following_ids = {int(k) for k in follows}
-        self.state.following_count = 0  # dedicated view; no section split needed
+        self.state.following_count = len(self.state.podcasts)
         self.state.podcast_cursor = 0
         self.state.view = "following"
         self.state.selected_podcast = None
-        self.state.cover_image_bytes = None
+        if self.state.podcasts and self._api:
+            await self._prefetch_images(self.state.podcasts)
         if self.state.podcasts:
             await self._on_podcast_cursor_change()
 
     # ── podcast/episode loading ───────────────────────────────────────────────
 
-    async def _load_trending(self) -> None:
+    async def _load_following_home(self) -> None:
+        """Load followed podcasts as the home screen."""
+        follows = store.get_follows()
+        self.state.following_ids = {int(k) for k in follows}
+        self.state.podcasts = list(follows.values())
+        self.state.following_count = len(self.state.podcasts)
+        self.state.podcast_cursor = 0
+        self.state.view = "home"
+        self.state.selected_podcast = None
+        if self.state.podcasts and self._api:
+            await self._prefetch_images(self.state.podcasts)
+            # Refresh metadata for any follow missing a description
+            for p in self.state.podcasts:
+                if not p.get("description"):
+                    asyncio.ensure_future(self._refresh_follow_metadata(p))
+        if self.state.podcasts:
+            await self._on_podcast_cursor_change()
+
+    async def _refresh_follow_metadata(self, podcast: dict) -> None:
+        """Fetch full feed data for a stored follow and backfill missing fields."""
         if not self._api:
             return
-        self.state.status = "Loading trending…"
-        self.state.loading = True
+        feed_id = podcast.get("id", 0)
         try:
-            podcasts = await self._api.trending(max=30)
-            follows = store.get_follows()
-            self.state.following_ids = {int(k) for k in follows}
-            following_pods = list(follows.values())
-            trending_pods = [p for p in podcasts if p.get("id", 0) not in self.state.following_ids]
-            self.state.podcasts = following_pods + trending_pods
-            self.state.following_count = len(following_pods)
-            self.state.podcast_cursor = 0
-            self.state.view = "home"
-            if self.state.podcasts:
-                await self._on_podcast_cursor_change()
-        except Exception as exc:
-            self.state.status = f"Error: {exc}"
-        finally:
-            self.state.loading = False
-            self.state.status = ""
+            full = await self._api.podcast(feed_id)
+            if not full:
+                return
+            updated = {**podcast, **full, "followed_at": podcast.get("followed_at", 0)}
+            store.follow(updated)
+            for i, p in enumerate(self.state.podcasts):
+                if p.get("id") == feed_id:
+                    self.state.podcasts[i] = updated
+                    if self.state.selected_podcast and self.state.selected_podcast.get("id") == feed_id:
+                        self.state.selected_podcast = updated
+                    break
+        except Exception:
+            pass
+
+    async def _prefetch_images(self, podcasts: list[dict]) -> None:
+        """Fetch images for a list of podcasts concurrently."""
+        if not self._api:
+            return
+
+        async def fetch_one(p: dict) -> None:
+            pid = p.get("id", 0)
+            if pid in self.state.cover_images:
+                return
+            url = p.get("artwork", "") or p.get("image", "")
+            if url:
+                try:
+                    data = await self._api.fetch_image(url)  # type: ignore[union-attr]
+                    if data:
+                        self.state.cover_images[pid] = data
+                except Exception:
+                    pass
+
+        await asyncio.gather(*[fetch_one(p) for p in podcasts])
+
+    async def _fetch_image_for(self, pid: int, url: str) -> None:
+        """Fetch and cache image for a single podcast id."""
+        if not self._api:
+            return
+        try:
+            data = await self._api.fetch_image(url)
+            if data:
+                self.state.cover_images[pid] = data
+        except Exception:
+            pass
+
+    async def _load_episodes_debounced(self, podcast: dict, pid: int) -> None:
+        """Wait briefly then load episodes, so rapid cursor moves don't spam the API."""
+        await asyncio.sleep(0.25)
+        if not self._api:
+            return
+        if not self.state.selected_podcast or self.state.selected_podcast.get("id") != pid:
+            return
+        if self.state.episodes_for_pod == pid:
+            return
+        await self._load_episodes_now(podcast, pid)
+
+    async def _load_episodes_now(self, podcast: dict, pid: int) -> None:
+        """Immediately load episodes for the given podcast."""
+        if not self._api:
+            return
+        self.state.episodes_for_pod = pid
+        self.state.episodes = []
+        self.state.episode_cursor = 0
+        try:
+            episodes = await self._api.episodes(pid, max=50)
+            if self.state.selected_podcast and self.state.selected_podcast.get("id") == pid:
+                self.state.episodes = episodes
+                self.state.episode_statuses = {
+                    ep["id"]: store.episode_status(ep["id"])
+                    for ep in episodes if ep.get("id")
+                }
+        except Exception:
+            pass
 
     async def _search(self, query: str) -> None:
         if not self._api:
@@ -301,12 +384,12 @@ class App:
         try:
             results = await self._api.search(query)
             self.state.podcasts = results
-            self.state.following_count = 0  # no section split for search results
+            self.state.following_count = 0
             self.state.podcast_cursor = 0
-            self.state.view = "home"
+            self.state.view = "search"
             self.state.selected_podcast = None
-            self.state.cover_image_bytes = None
             if results:
+                await self._prefetch_images(results)
                 await self._on_podcast_cursor_change()
             else:
                 self.state.status = "No results"
@@ -319,38 +402,12 @@ class App:
             if self.state.status.startswith("Searching"):
                 self.state.status = ""
 
-    async def _open_podcast(self, podcast: dict) -> None:
-        if not self._api:
-            return
-        self.state.view = "podcast"
-        self.state.selected_podcast = podcast
-        self.state.episodes = []
-        self.state.episode_cursor = 0
-        self.state.loading = True
-        try:
-            feed_id = podcast.get("id", 0)
-            episodes, image_bytes = await asyncio.gather(
-                self._api.episodes(feed_id, max=50),
-                self._api.fetch_image(podcast.get("artwork", "") or podcast.get("image", "")),
-            )
-            self.state.episodes = episodes
-            self.state.cover_image_bytes = image_bytes
-            # Load statuses
-            self.state.episode_statuses = {
-                ep["id"]: store.episode_status(ep["id"]) for ep in episodes if ep.get("id")
-            }
-        except Exception as exc:
-            self.state.status = f"Error: {exc}"
-            await self._clear_status()
-        finally:
-            self.state.loading = False
-
     async def _play_latest(self, podcast: dict) -> None:
         """Fetch the latest episode of podcast and start playback immediately."""
         if not self._api:
             return
         feed_id = podcast.get("id", 0)
-        podcast_title = podcast.get("title", "")  # capture before await
+        podcast_title = podcast.get("title", "")
         self.state.status = "Loading…"
         try:
             episodes = await self._api.episodes(feed_id, max=1)
@@ -389,7 +446,6 @@ class App:
 
     def _request_stop(self) -> None:
         self._running = False
-        # Cancel all tasks
         for task in asyncio.all_tasks():
             task.cancel()
 

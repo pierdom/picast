@@ -1,13 +1,11 @@
 """Screen renderer — btop-inspired layout.
 
-Two ROUNDED panels side by side (left = list, right = details) with a
-1-column gap between them, giving the ╮ ╭ junction btop uses. Below
-them sits a ROUNDED player panel whose border colour reacts to playback
-state. A thin header bar runs across the top.
+Two ROUNDED panels side by side (left = podcast cards grid, right = episode list)
+with a 1-column gap between them. Below them sits a ROUNDED player panel whose
+border colour reacts to playback state. A thin header bar runs across the top.
 
-Image rendering: half-block art is embedded in the right panel content;
-for Kitty/iTerm2/Sixel terminals an escape-code overlay is written over
-the same cell area after the frame for higher quality.
+Image rendering: half-block art is embedded inside each podcast card. No protocol
+image overlay is used.
 """
 from __future__ import annotations
 
@@ -25,13 +23,13 @@ from rich.text import Text
 from picast import image as img_mod
 from picast.ui import panels, theme
 
-# Image area (terminal cells)
-IMAGE_COLS = 22
-IMAGE_ROWS = 11   # half-block: 2 px/row → 22×22 px block
+# Thumbnail size inside each podcast card (terminal cells)
+CARD_THUMB_W = 10   # terminal cols per thumbnail
+CARD_THUMB_H = 5    # terminal rows per thumbnail
 
 # Column split ratios
-LEFT_RATIO = 2
-RIGHT_RATIO = 3
+LEFT_RATIO = 3
+RIGHT_RATIO = 2
 
 HEADER_HEIGHT = 1
 PLAYER_HEIGHT = 6   # ╭border╮ + title_line + progress_bar + blank + hints_line + ╰border╯
@@ -46,14 +44,15 @@ class RenderState:
     podcasts: list[dict] = field(default_factory=list)
     podcast_cursor: int = 0
     following_ids: set[int] = field(default_factory=set)
-    following_count: int = 0   # podcasts[:following_count] are follows; rest are trending
+    following_count: int = 0
 
     episodes: list[dict] = field(default_factory=list)
     episode_cursor: int = 0
     episode_statuses: dict[int, str] = field(default_factory=dict)
 
     selected_podcast: dict | None = None
-    cover_image_bytes: bytes | None = None
+    cover_images: dict[int, bytes] = field(default_factory=dict)   # podcast_id → image bytes
+    episodes_for_pod: int | None = None   # feed_id whose episodes are in state.episodes
     loading: bool = False
 
     now_playing_episode: dict | None = None
@@ -69,53 +68,8 @@ class Renderer:
     def __init__(self) -> None:
         self._console: Console | None = None
         self._console_size: tuple[int, int] = (0, 0)
-        self._last_cover: bytes | None = None
-        self._image_lines: list[str] = []       # protocol overlay (written after frame)
-        self._half_block_lines: list[str] = []  # half-block art (embedded in right panel)
-        self._kitty_cached_cover: bytes | None = None  # what's in the Kitty terminal cache
-        self._image_cols: int = IMAGE_COLS
-        self._image_rows: int = IMAGE_ROWS
-
-    def _query_cell_px(self) -> tuple[int, int] | None:
-        """Query terminal cell size in pixels via CSI 16 t.
-
-        Uses os.read() directly on the fd to bypass Python's IO buffering,
-        and selects on the raw fd (not the file object) for the same reason.
-        Returns (cell_w, cell_h) in pixels, or None on timeout/error.
-        """
-        import re
-        import select
-        import termios
-        import tty
-
-        try:
-            fd = sys.stdin.fileno()
-            if not os.isatty(fd):
-                return None
-            old = termios.tcgetattr(fd)
-            tty.setraw(fd)
-            sys.stdout.write("\033[16t")
-            sys.stdout.flush()
-            # Wait up to 300 ms for the first byte (raw fd, bypasses Python buffer)
-            if not select.select([fd], [], [], 0.3)[0]:
-                termios.tcsetattr(fd, termios.TCSADRAIN, old)
-                return None
-            resp = b""
-            while len(resp) < 32:
-                # 50 ms per-character timeout handles slow responses gracefully
-                if not select.select([fd], [], [], 0.05)[0]:
-                    break
-                ch = os.read(fd, 1)
-                resp += ch
-                if ch == b"t":
-                    break
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
-            m = re.search(rb"\[6;(\d+);(\d+)t", resp)
-            if m:
-                return int(m.group(2)), int(m.group(1))  # (cell_w, cell_h)
-        except Exception:
-            pass
-        return None
+        self._half_block_cache: dict[int, list[str]] = {}
+        self._kitty_card_cache: dict[int, bytes] = {}  # podcast_id → bytes in Kitty's cache
 
     def _get_console(self, cols: int, rows: int) -> Console:
         if (cols, rows) != self._console_size:
@@ -136,14 +90,6 @@ class Renderer:
         sys.stdout.write("\033[2J\033[H")        # clear + top-left
         sys.stdout.flush()
         img_mod._detect()                        # re-probe now that stdout is a real tty
-        # Calibrate image rows to the actual cell aspect ratio so covers appear square.
-        cell = self._query_cell_px()
-        if cell:
-            cell_w, cell_h = cell
-            new_rows = max(4, round(self._image_cols * cell_w / cell_h))
-            if new_rows != self._image_rows:
-                self._image_rows = new_rows
-                self._last_cover = None          # invalidate cached renders
 
     def exit_screen(self) -> None:
         sys.stdout.write("\033[?25h")            # show cursor
@@ -163,94 +109,86 @@ class Renderer:
         console = self._get_console(cols, rows)
         main_height = max(6, rows - HEADER_HEIGHT - PLAYER_HEIGHT)
 
-        # left_allocated: columns given to the left Layout section (includes panel borders).
-        # A 1-column gap sits between the two panels → subtract 1 from available width.
         left_allocated = (cols - 1) * LEFT_RATIO // (LEFT_RATIO + RIGHT_RATIO)
         left_inner = left_allocated - 4   # ROUNDED borders(2) + padding each side(2)
         list_height = main_height - 2    # ROUNDED panel top + bottom borders
 
-        # ── left panel (podcast / episode list) ───────────────────────────────
-        if state.view in ("home", "following"):
-            if state.view == "following":
-                list_panel_title = f"[bold {theme.ACCENT}]★ Following[/]"
-            elif state.following_count > 0:
-                list_panel_title = f"[bold {theme.ACCENT}]★ Podcasts[/]"
-            else:
-                list_panel_title = f"[{theme.FG_DIM}]Trending[/]"
-            left_content = panels.podcast_list_content(
-                state.podcasts, state.podcast_cursor, state.following_ids,
-                playing_feed_id=None, height=list_height, width=left_inner,
-                following_count=state.following_count if state.view == "home" else 0,
-            )
-        else:
-            playing_ep_id = (
-                state.now_playing_episode.get("id") if state.now_playing_episode else None
-            )
-            list_panel_title = f"[bold {theme.ACCENT}]◎ Episodes[/]"
-            left_content = panels.episode_list_content(
-                state.episodes, state.episode_cursor, state.episode_statuses,
-                playing_episode_id=playing_ep_id, height=list_height,
-            )
+        # ── image cache update ────────────────────────────────────────────────
+        use_protocol = img_mod.protocol_name() in ("kitty", "iterm2")
+        current_ids = {p.get("id", 0) for p in state.podcasts}
+
+        # Always keep half-block cache populated as fallback.
+        for p in state.podcasts:
+            pid = p.get("id", 0)
+            if pid and pid in state.cover_images and pid not in self._half_block_cache:
+                self._half_block_cache[pid] = img_mod.render_half_block_lines(
+                    state.cover_images[pid], CARD_THUMB_W, CARD_THUMB_H
+                )
+        for stale_id in [k for k in self._half_block_cache if k not in current_ids]:
+            del self._half_block_cache[stale_id]
+
+        # Pass blank images when protocol is active so cards reserve space for overlay.
+        display_images = {} if use_protocol else self._half_block_cache
+
+        # ── left panel content (podcast cards) ───────────────────────────────
+        import time as _time
+        now = int(_time.time())
+        now_playing_feed_id = None
+        if state.now_playing_episode and state.selected_podcast:
+            now_playing_feed_id = state.selected_podcast.get("id")
+
+        left_content = panels.podcast_cards_content(
+            podcasts=state.podcasts,
+            cursor=state.podcast_cursor,
+            following_ids=state.following_ids,
+            half_block_images=display_images,
+            thumb_w=CARD_THUMB_W,
+            thumb_h=CARD_THUMB_H,
+            total_width=left_inner,
+            height=list_height,
+            now_playing_feed_id=now_playing_feed_id,
+            view=state.view,
+        )
 
         left_panel = Panel(
             left_content,
-            title=list_panel_title,
-            title_align="left",
-            border_style=theme.ACCENT_DIM,
+            border_style=theme.ACCENT_DIM if state.view != "podcast" else theme.BORDER_COLOR,
             box=richbox.ROUNDED,
             padding=(0, 1),
         )
 
-        # ── image cache: recompute only when cover changes ────────────────────
-        if state.cover_image_bytes is not self._last_cover:
-            self._last_cover = state.cover_image_bytes
-            if state.cover_image_bytes:
-                self._image_lines = img_mod.render_frame_lines(
-                    state.cover_image_bytes, self._image_cols, self._image_rows
-                )
-                # Use half-block only when no protocol image is available;
-                # otherwise leave the placeholder blank so the overlay shows cleanly.
-                if self._image_lines:
-                    self._half_block_lines = []
-                else:
-                    self._half_block_lines = img_mod.render_half_block_lines(
-                        state.cover_image_bytes, self._image_cols, self._image_rows
-                    )
-            else:
-                self._half_block_lines = []
-                self._image_lines = []
-
-        # ── right panel (cover art + podcast detail) ──────────────────────────
-        is_following = (
-            state.selected_podcast is not None
-            and state.selected_podcast.get("id", 0) in state.following_ids
-        )
-        right_content = panels.detail_content(
-            state.selected_podcast,
-            self._half_block_lines,
-            self._image_cols,
-            self._image_rows,
-            is_following=is_following,
-            loading=state.loading,
-        )
+        # ── right panel title ─────────────────────────────────────────────────
         if state.selected_podcast:
             pod_name = state.selected_podcast.get("title", "")
             if len(pod_name) > 42:
                 pod_name = pod_name[:39] + "…"
             detail_panel_title = f"[bold {theme.FG}]{pod_name}[/]"
         else:
-            detail_panel_title = f"[{theme.FG_DIM}]Details[/]"
+            detail_panel_title = f"[{theme.FG_DIM}]Episodes[/]"
+
+        # ── right panel content (episode list) ───────────────────────────────
+        playing_ep_id = (
+            state.now_playing_episode.get("id") if state.now_playing_episode else None
+        )
+        right_content = panels.episode_list_content(
+            state.episodes,
+            state.episode_cursor,
+            state.episode_statuses,
+            playing_episode_id=playing_ep_id,
+            height=list_height,
+            has_focus=state.view == "podcast",
+        )
 
         right_panel = Panel(
             right_content,
             title=detail_panel_title,
             title_align="left",
-            border_style=theme.DETAIL_BORDER,
+            border_style=theme.ACCENT_DIM if state.view == "podcast" else theme.DETAIL_BORDER,
             box=richbox.ROUNDED,
             padding=(0, 1),
         )
 
-        # ── player panel (title + progress bar + hints; border reacts to state) ─
+        # ── player panel ──────────────────────────────────────────────────────
         player_group = panels.player_content(
             state.now_playing_episode,
             state.now_playing_podcast_title,
@@ -289,13 +227,15 @@ class Renderer:
 
         if state.view == "following":
             header.append("Following", style=Style(color=theme.ACCENT, bold=True))
+        elif state.view == "search":
+            header.append("Search Results", style=Style(color=theme.FG_DIM))
         elif state.view == "podcast" and state.selected_podcast:
             header.append(
                 state.selected_podcast.get("title", "")[:50],
                 style=Style(color=theme.FG_DIM, italic=True),
             )
         elif state.following_count > 0:
-            header.append("Podcasts", style=Style(color=theme.FG_DIM))
+            header.append("Following", style=Style(color=theme.ACCENT, bold=True))
         else:
             header.append("Trending", style=Style(color=theme.FG_DIM))
 
@@ -306,9 +246,6 @@ class Renderer:
             header.append(f"{ep_icon} ", style=Style(color=theme.PLAYING_COLOR, bold=True))
             header.append(ep_title, style=Style(color=theme.FG_DIM))
 
-        proto = img_mod.protocol_name()
-        if proto != "block":
-            header.append(f"  [{proto}]", style=Style(color=theme.FG_DIM))
         if state.status:
             header.append(f"  {state.status}", style=Style(color=theme.WARNING))
 
@@ -334,40 +271,65 @@ class Renderer:
         # ── capture to string and write atomically ────────────────────────────
         with console.capture() as cap:
             console.print(layout, end="")
-        # \r\n: tty.setraw() disables ONLCR so bare \n is LF-only; \r\n guarantees
-        # column-1 reset. Clip to rows lines so cursor never advances past last row.
         frame = "\r\n".join(cap.get().split("\n")[:rows])
 
-        # ── protocol image overlay ────────────────────────────────────────────
-        # img_row = header(1) + right-panel-top-border(1) + 1-indexed = HEADER_HEIGHT + 2
-        # img_col = left_allocated + gap(1) + right-border(1) + right-padding(1) + 1-indexed
-        #         = left_allocated + 4
+        # ── protocol image overlay for card thumbnails ────────────────────────
         image_overlay = ""
-        if self._image_lines:
-            img_row = HEADER_HEIGHT + 2
-            img_col = left_allocated + 4
-            cursor = f"\033[{img_row};{img_col}H"
-            if img_mod.protocol_name() == "kitty":
-                if state.cover_image_bytes is not self._kitty_cached_cover:
-                    # New cover: delete old slot then transmit fresh image.
-                    delete = img_mod.kitty_delete() if self._kitty_cached_cover is not None else ""
-                    self._kitty_cached_cover = state.cover_image_bytes
-                    image_overlay = cursor + delete + self._image_lines[0]
-                else:
-                    # Same cover: just re-place the cached image (tiny sequence).
-                    image_overlay = cursor + img_mod.kitty_redisplay(self._image_cols, self._image_rows)
-            else:
-                # iTerm2: always retransmit (no server-side cache).
-                image_overlay = cursor + self._image_lines[0]
-        elif self._kitty_cached_cover is not None:
-            # Cover cleared: evict Kitty cache.
-            image_overlay = img_mod.kitty_delete()
-            self._kitty_cached_cover = None
+        if use_protocol and state.podcasts:
+            card_height = CARD_THUMB_H + 4   # border-top + thumb_h rows + meta row + play row + border-bottom
+            visible_rows = max(1, list_height // card_height)
+            cursor_row = state.podcast_cursor // 2
+            total_rows = (len(state.podcasts) + 1) // 2
+            start_row = max(0, min(total_rows - visible_rows, cursor_row - visible_rows // 2))
+            card_w = max(10, (left_inner - 1) // 2)
+            visible_pids: set[int] = set()
 
-        # ── write frame + overlay atomically via synchronized output ──────────
-        # \033[?2026h / l = BSU/ESU: terminal buffers rendering until ESU, so the
-        # screen clear, frame, and image all appear in a single vsync-aligned paint.
-        # Terminals that don't support it silently ignore the sequences.
+            for vr in range(visible_rows):
+                grid_row = start_row + vr
+                for vc in range(2):
+                    pod_idx = grid_row * 2 + vc
+                    if pod_idx >= len(state.podcasts):
+                        continue
+                    pid = state.podcasts[pod_idx].get("id", 0)
+                    img_bytes = state.cover_images.get(pid)
+                    if not img_bytes:
+                        continue
+                    visible_pids.add(pid)
+
+                    # Terminal position: row 1=header, row 2=panel border, row 3=panel content.
+                    # Card top border at row 3 + vr*card_height → thumbnail at +1.
+                    term_row = HEADER_HEIGHT + vr * card_height + 3
+                    # Column: panel border(1) + panel padding(1) + card border(1) + 1-indexed = 4
+                    # Right card: add card_w (left outer) + 1 (gap) + 1 (right border) = card_w+3
+                    term_col = 4 if vc == 0 else (card_w + 5)
+                    cursor_seq = f"\033[{term_row};{term_col}H"
+
+                    if img_mod.protocol_name() == "kitty":
+                        if self._kitty_card_cache.get(pid) is not img_bytes:
+                            if pid in self._kitty_card_cache:
+                                image_overlay += img_mod.kitty_delete(pid)
+                            self._kitty_card_cache[pid] = img_bytes
+                            lines = img_mod.render_frame_lines(
+                                img_bytes, CARD_THUMB_W, CARD_THUMB_H, kitty_id=pid
+                            )
+                            if lines:
+                                image_overlay += cursor_seq + lines[0]
+                        else:
+                            image_overlay += cursor_seq + img_mod.kitty_redisplay(
+                                CARD_THUMB_W, CARD_THUMB_H, kitty_id=pid
+                            )
+                    else:  # iTerm2: always retransmit
+                        lines = img_mod.render_frame_lines(img_bytes, CARD_THUMB_W, CARD_THUMB_H)
+                        if lines:
+                            image_overlay += cursor_seq + lines[0]
+
+            # Evict Kitty slots for podcasts no longer in the visible window.
+            if img_mod.protocol_name() == "kitty":
+                stale = [k for k in self._kitty_card_cache if k not in visible_pids]
+                for stale_pid in stale:
+                    image_overlay += img_mod.kitty_delete(stale_pid)
+                    del self._kitty_card_cache[stale_pid]
+
         sys.stdout.write(
             "\033[?2026h"
             + "\033[2J\033[H\033[?25l"
