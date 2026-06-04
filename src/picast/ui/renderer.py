@@ -92,6 +92,14 @@ class Renderer:
         img_mod._detect()                        # re-probe now that stdout is a real tty
 
     def exit_screen(self) -> None:
+        # Close any open BSU frame (no-op on terminals that don't support it)
+        sys.stdout.write("\033[?2026l")
+        # Delete Kitty images still in the terminal cache
+        if img_mod.protocol_name() == "kitty" and self._kitty_card_cache:
+            for pid in list(self._kitty_card_cache):
+                sys.stdout.write(img_mod.kitty_delete(pid))
+            self._kitty_card_cache.clear()
+        sys.stdout.write("\033[2J\033[H")        # clear alternate screen
         sys.stdout.write("\033[?25h")            # show cursor
         sys.stdout.write("\033[?1049l")          # restore main screen
         sys.stdout.flush()
