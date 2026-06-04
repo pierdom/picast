@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from dataclasses import dataclass, field
 
 from rich import box as richbox
@@ -70,6 +71,8 @@ class Renderer:
         self._console_size: tuple[int, int] = (0, 0)
         self._half_block_cache: dict[int, list[str]] = {}
         self._kitty_card_cache: dict[int, bytes] = {}  # podcast_id → bytes in Kitty's cache
+        self._render_lock = threading.Lock()
+        self._exiting = False
 
     def _get_console(self, cols: int, rows: int) -> Console:
         if (cols, rows) != self._console_size:
@@ -92,18 +95,28 @@ class Renderer:
         img_mod._detect()                        # re-probe now that stdout is a real tty
 
     def exit_screen(self) -> None:
-        sys.stdout.write("\033[?2026l")           # close any open BSU
-        sys.stdout.write("\033[0m")               # reset SGR (colors, bold, etc.)
-        if img_mod.protocol_name() == "kitty":
-            sys.stdout.write("\033_Ga=d,d=a,q=2\033\\")  # delete all Kitty images
-            self._kitty_card_cache.clear()
-        sys.stdout.write("\033[2J\033[H")         # clear alternate screen
-        sys.stdout.write("\033[?1049l")           # restore main screen
-        sys.stdout.write("\033[?25h")             # show cursor (must be after screen restore)
-        sys.stdout.write("\033[0m")               # reset SGR on main screen too
-        sys.stdout.flush()
+        with self._render_lock:
+            # _exiting=True prevents any new render from writing after we clean up.
+            # The lock itself ensures we wait for any in-progress render to finish.
+            self._exiting = True
+            sys.stdout.write("\033[?2026l")           # close any open BSU
+            sys.stdout.write("\033[0m")               # reset SGR (colors, bold, etc.)
+            if img_mod.protocol_name() == "kitty":
+                sys.stdout.write("\033_Ga=d,d=a,q=2\033\\")  # delete all Kitty images
+                self._kitty_card_cache.clear()
+            sys.stdout.write("\033[2J\033[H")         # clear alternate screen
+            sys.stdout.write("\033[?1049l")           # restore main screen
+            sys.stdout.write("\033[?25h")             # show cursor (after screen restore)
+            sys.stdout.write("\033[0m")               # reset SGR on main screen
+            sys.stdout.flush()
 
     def render(self, state: RenderState) -> None:
+        with self._render_lock:
+            if self._exiting:
+                return
+            self._render_locked(state)
+
+    def _render_locked(self, state: RenderState) -> None:
         try:
             sz = os.get_terminal_size()
             cols, rows = sz.columns, sz.lines
