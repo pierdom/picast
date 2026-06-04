@@ -34,10 +34,8 @@ def get_follows() -> dict[str, dict]:
 def follow(podcast: dict) -> None:
     follows = get_follows()
     follows[str(podcast["id"])] = {
-        "id": podcast["id"],
-        "title": podcast.get("title", ""),
+        **podcast,
         "artwork": podcast.get("artwork", "") or podcast.get("image", ""),
-        "author": podcast.get("author", ""),
         "followed_at": int(time.time()),
     }
     _dump(_FOLLOWS_PATH, follows)

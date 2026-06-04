@@ -34,7 +34,7 @@ LEFT_RATIO = 2
 RIGHT_RATIO = 3
 
 HEADER_HEIGHT = 1
-PLAYER_HEIGHT = 4   # ╭border╮ + player_line + hints_line + ╰border╯
+PLAYER_HEIGHT = 6   # ╭border╮ + title_line + progress_bar + blank + hints_line + ╰border╯
 
 
 @dataclass
@@ -72,6 +72,50 @@ class Renderer:
         self._last_cover: bytes | None = None
         self._image_lines: list[str] = []       # protocol overlay (written after frame)
         self._half_block_lines: list[str] = []  # half-block art (embedded in right panel)
+        self._kitty_cached_cover: bytes | None = None  # what's in the Kitty terminal cache
+        self._image_cols: int = IMAGE_COLS
+        self._image_rows: int = IMAGE_ROWS
+
+    def _query_cell_px(self) -> tuple[int, int] | None:
+        """Query terminal cell size in pixels via CSI 16 t.
+
+        Uses os.read() directly on the fd to bypass Python's IO buffering,
+        and selects on the raw fd (not the file object) for the same reason.
+        Returns (cell_w, cell_h) in pixels, or None on timeout/error.
+        """
+        import re
+        import select
+        import termios
+        import tty
+
+        try:
+            fd = sys.stdin.fileno()
+            if not os.isatty(fd):
+                return None
+            old = termios.tcgetattr(fd)
+            tty.setraw(fd)
+            sys.stdout.write("\033[16t")
+            sys.stdout.flush()
+            # Wait up to 300 ms for the first byte (raw fd, bypasses Python buffer)
+            if not select.select([fd], [], [], 0.3)[0]:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+                return None
+            resp = b""
+            while len(resp) < 32:
+                # 50 ms per-character timeout handles slow responses gracefully
+                if not select.select([fd], [], [], 0.05)[0]:
+                    break
+                ch = os.read(fd, 1)
+                resp += ch
+                if ch == b"t":
+                    break
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            m = re.search(rb"\[6;(\d+);(\d+)t", resp)
+            if m:
+                return int(m.group(2)), int(m.group(1))  # (cell_w, cell_h)
+        except Exception:
+            pass
+        return None
 
     def _get_console(self, cols: int, rows: int) -> Console:
         if (cols, rows) != self._console_size:
@@ -92,6 +136,14 @@ class Renderer:
         sys.stdout.write("\033[2J\033[H")        # clear + top-left
         sys.stdout.flush()
         img_mod._detect()                        # re-probe now that stdout is a real tty
+        # Calibrate image rows to the actual cell aspect ratio so covers appear square.
+        cell = self._query_cell_px()
+        if cell:
+            cell_w, cell_h = cell
+            new_rows = max(4, round(self._image_cols * cell_w / cell_h))
+            if new_rows != self._image_rows:
+                self._image_rows = new_rows
+                self._last_cover = None          # invalidate cached renders
 
     def exit_screen(self) -> None:
         sys.stdout.write("\033[?25h")            # show cursor
@@ -153,16 +205,17 @@ class Renderer:
         if state.cover_image_bytes is not self._last_cover:
             self._last_cover = state.cover_image_bytes
             if state.cover_image_bytes:
-                self._half_block_lines = img_mod.render_half_block_lines(
-                    state.cover_image_bytes, IMAGE_COLS, IMAGE_ROWS
+                self._image_lines = img_mod.render_frame_lines(
+                    state.cover_image_bytes, self._image_cols, self._image_rows
                 )
-                self._image_lines = (
-                    img_mod.render_frame_lines(
-                        state.cover_image_bytes, IMAGE_COLS, IMAGE_ROWS
+                # Use half-block only when no protocol image is available;
+                # otherwise leave the placeholder blank so the overlay shows cleanly.
+                if self._image_lines:
+                    self._half_block_lines = []
+                else:
+                    self._half_block_lines = img_mod.render_half_block_lines(
+                        state.cover_image_bytes, self._image_cols, self._image_rows
                     )
-                    if img_mod.protocol_name() != "block"
-                    else []
-                )
             else:
                 self._half_block_lines = []
                 self._image_lines = []
@@ -175,8 +228,8 @@ class Renderer:
         right_content = panels.detail_content(
             state.selected_podcast,
             self._half_block_lines,
-            IMAGE_COLS,
-            IMAGE_ROWS,
+            self._image_cols,
+            self._image_rows,
             is_following=is_following,
             loading=state.loading,
         )
@@ -197,8 +250,8 @@ class Renderer:
             padding=(0, 1),
         )
 
-        # ── player panel (playback + hints; border changes with state) ────────
-        player_line = panels.player_line(
+        # ── player panel (title + progress bar + hints; border reacts to state) ─
+        player_group = panels.player_content(
             state.now_playing_episode,
             state.now_playing_podcast_title,
             state.playback_position,
@@ -220,7 +273,7 @@ class Renderer:
             player_title = f"[{theme.FG_DIM}]Player[/]"
 
         player_panel = Panel(
-            Group(player_line, hints),
+            Group(player_group, Text(""), hints),
             title=player_title,
             title_align="left",
             border_style=player_border,
@@ -286,19 +339,40 @@ class Renderer:
         frame = "\r\n".join(cap.get().split("\n")[:rows])
 
         # ── protocol image overlay ────────────────────────────────────────────
-        # Layout: header(1) │ main: [left_allocated | gap(1) | right] │ player(4)
-        #   img_row = header(1) + right-panel-top-border(1) + 1-indexed = HEADER_HEIGHT + 2
-        #   img_col = left_allocated + gap(1) + right-border(1) + right-padding(1) + 1-indexed
-        #           = left_allocated + 4
+        # img_row = header(1) + right-panel-top-border(1) + 1-indexed = HEADER_HEIGHT + 2
+        # img_col = left_allocated + gap(1) + right-border(1) + right-padding(1) + 1-indexed
+        #         = left_allocated + 4
         image_overlay = ""
         if self._image_lines:
             img_row = HEADER_HEIGHT + 2
             img_col = left_allocated + 4
-            parts = []
-            for i, line in enumerate(self._image_lines):
-                parts.append(f"\033[{img_row + i};{img_col}H{line}")
-            image_overlay = "".join(parts)
+            cursor = f"\033[{img_row};{img_col}H"
+            if img_mod.protocol_name() == "kitty":
+                if state.cover_image_bytes is not self._kitty_cached_cover:
+                    # New cover: delete old slot then transmit fresh image.
+                    delete = img_mod.kitty_delete() if self._kitty_cached_cover is not None else ""
+                    self._kitty_cached_cover = state.cover_image_bytes
+                    image_overlay = cursor + delete + self._image_lines[0]
+                else:
+                    # Same cover: just re-place the cached image (tiny sequence).
+                    image_overlay = cursor + img_mod.kitty_redisplay(self._image_cols, self._image_rows)
+            else:
+                # iTerm2: always retransmit (no server-side cache).
+                image_overlay = cursor + self._image_lines[0]
+        elif self._kitty_cached_cover is not None:
+            # Cover cleared: evict Kitty cache.
+            image_overlay = img_mod.kitty_delete()
+            self._kitty_cached_cover = None
 
-        # ── write frame + overlay atomically ──────────────────────────────────
-        sys.stdout.write("\033[2J\033[H\033[?25l" + frame + image_overlay)
+        # ── write frame + overlay atomically via synchronized output ──────────
+        # \033[?2026h / l = BSU/ESU: terminal buffers rendering until ESU, so the
+        # screen clear, frame, and image all appear in a single vsync-aligned paint.
+        # Terminals that don't support it silently ignore the sequences.
+        sys.stdout.write(
+            "\033[?2026h"
+            + "\033[2J\033[H\033[?25l"
+            + frame
+            + image_overlay
+            + "\033[?2026l"
+        )
         sys.stdout.flush()

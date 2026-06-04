@@ -1,6 +1,7 @@
 """Rich renderable builders for each UI panel."""
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 
 from rich.console import Group
@@ -27,6 +28,8 @@ from picast.ui.theme import (
     STARTED_ICON,
     UNFOLLOW_ICON,
 )
+
+_NEW_EPISODE_SECS = 7 * 86400  # 7 days → show NEW badge
 
 
 def _fmt_dur(seconds: int) -> str:
@@ -64,18 +67,28 @@ def podcast_list_content(
     width: int = 30,
     following_count: int = 0,
 ) -> Table:
+    now = int(time.time())
+
+    # icon(1) · name(expanding) · badge(4)
+    badge_w = 4
     table = Table.grid(padding=(0, 0))
     table.add_column(width=1)
-    table.add_column(max_width=width - 2, no_wrap=True)
+    table.add_column(max_width=max(1, width - 1 - badge_w), no_wrap=True)
+    table.add_column(width=badge_w)
 
     # Build a flat display list.
-    # Kinds: "following_header" | "spacer" | "trending_header" | "podcast"
+    # Kinds: "following_header" | "podcast" | "podcast_sub" | "spacer" | "trending_header"
     display: list[tuple] = []
 
     if following_count > 0 and len(podcasts) > 0:
         display.append(("following_header", None, -1))
         for li in range(min(following_count, len(podcasts))):
-            display.append(("podcast", podcasts[li], li))
+            p = podcasts[li]
+            display.append(("podcast", p, li))
+            pub_ts = p.get("newestItemPubdate", 0) or 0
+            ep_count = p.get("episodeCount", 0) or 0
+            if pub_ts or ep_count:
+                display.append(("podcast_sub", p, li))
         if len(podcasts) > following_count:
             display.append(("spacer", None, -1))
             display.append(("trending_header", None, -1))
@@ -86,7 +99,7 @@ def podcast_list_content(
             display.append(("podcast", p, li))
 
     if not display:
-        table.add_row("", Text("No podcasts", style=Style(color=FG_DIM, italic=True)))
+        table.add_row("", Text("No podcasts", style=Style(color=FG_DIM, italic=True)), "")
         return table
 
     # Find the visual index of the cursor to centre the scroll window on it.
@@ -99,32 +112,49 @@ def podcast_list_content(
     visual_start = max(0, visual_cursor - height // 2)
     visible = display[visual_start: visual_start + height]
 
-    title_w = max(0, width - 2)  # characters available in the title column
+    title_w = max(0, width - 1 - badge_w)
 
     for entry in visible:
         kind = entry[0]
 
         if kind == "following_header":
-            # Rule-style header: "★  Following ──────────────────────"
             label = " Following"
             dashes = "─" * max(0, title_w - len(label))
             t = Text(no_wrap=True)
             t.append(label, style=Style(color=ACCENT, bold=True))
             t.append(dashes, style=Style(color=ACCENT_DIM))
-            table.add_row(Text("★", style=Style(color=ACCENT, bold=True)), t)
+            table.add_row(Text("★", style=Style(color=ACCENT, bold=True)), t, Text(""))
 
         elif kind == "spacer":
-            table.add_row(Text(""), Text(""))
+            table.add_row(Text(""), Text(""), Text(""))
 
         elif kind == "trending_header":
-            # Centred rule: "──────── Trending ──────────────────"
             label = " Trending "
             n = max(0, title_w - len(label))
             t = Text(no_wrap=True)
             t.append("─" * (n // 2), style=Style(color=FG_DIM))
             t.append(label, style=Style(color=FG_DIM, italic=True))
             t.append("─" * (n - n // 2), style=Style(color=FG_DIM))
-            table.add_row(Text(""), t)
+            table.add_row(Text(""), t, Text(""))
+
+        elif kind == "podcast_sub":
+            _, p, li = entry
+            is_selected = li == cursor
+            pub_ts = p.get("newestItemPubdate", 0) or 0
+            ep_count = p.get("episodeCount", 0) or 0
+            parts: list[str] = []
+            if pub_ts:
+                parts.append(_fmt_date(pub_ts))
+            if ep_count:
+                parts.append(f"{ep_count} ep")
+            sub_str = "  " + "  ·  ".join(parts)
+            row_style = Style(bgcolor=BG_SELECT) if is_selected else Style()
+            table.add_row(
+                Text(""),
+                Text(sub_str, style=Style(color=FG_DIM), overflow="ellipsis", no_wrap=True),
+                Text(""),
+                style=row_style,
+            )
 
         else:  # podcast
             _, p, li = entry
@@ -138,9 +168,17 @@ def podcast_list_content(
             row_style = Style(bgcolor=BG_SELECT) if is_selected else Style()
             name_style = Style(color=FG, bold=True) if is_selected else Style(color=FG)
 
+            # NEW badge: show for followed podcasts with a recent episode
+            badge_t = Text("")
+            if is_followed:
+                pub_ts = p.get("newestItemPubdate", 0) or 0
+                if pub_ts and (now - pub_ts) < _NEW_EPISODE_SECS:
+                    badge_t = Text("NEW", style=Style(color=NEW_COLOR, bold=True))
+
             table.add_row(
                 Text(icon, style=icon_style),
                 Text(name, style=name_style, overflow="ellipsis", no_wrap=True),
+                badge_t,
                 style=row_style,
             )
 
@@ -245,40 +283,43 @@ def detail_content(
     return Group(*lines)
 
 
-# ── player line ───────────────────────────────────────────────────────────────
+# ── player content (title line + progress bar) ────────────────────────────────
 
-def player_line(
+def player_content(
     episode: dict | None,
     podcast_title: str,
     position: float,
     duration: float,
     is_playing: bool,
     width: int,
-) -> Text:
+) -> Group:
     if episode is None:
-        t = Text(no_wrap=True, overflow="ellipsis")
-        t.append("  No media playing", style=Style(color=FG_DIM))
-        return t
+        return Group(
+            Text("  No media playing", style=Style(color=FG_DIM)),
+            Text(""),
+        )
 
     icon = PLAYING_ICON if is_playing else PAUSED_ICON
-    title = episode.get("title", "")
+    ep_title = episode.get("title", "")
     pos_str = _fmt_dur(int(position)) or "0:00"
     dur_str = _fmt_dur(int(duration)) if duration else "?:??"
 
-    bar_width = max(10, width - 50)
+    title_t = Text(no_wrap=True, overflow="ellipsis")
+    title_t.append(f" {icon} ", style=Style(color=PLAYING_COLOR, bold=True))
+    if podcast_title:
+        title_t.append(f"{podcast_title}  ", style=Style(color=FG_DIM))
+    title_t.append(ep_title, style=Style(color=FG))
+    title_t.append(f"  {pos_str} / {dur_str}", style=Style(color=FG_DIM))
+
+    # Full-width progress bar (panel overhead: 2 borders + 2×1 padding = 4)
+    bar_width = max(10, width - 4)
     frac = min(1.0, position / duration) if duration > 0 else 0.0
     filled = int(frac * bar_width)
-    bar = "█" * filled + "░" * (bar_width - filled)
+    bar_t = Text(no_wrap=True)
+    bar_t.append("█" * filled, style=Style(color=PLAYING_COLOR))
+    bar_t.append("░" * (bar_width - filled), style=Style(color=BORDER_COLOR))
 
-    t = Text(no_wrap=True, overflow="ellipsis")
-    t.append(f" {icon} ", style=Style(color=PLAYING_COLOR, bold=True))
-    if podcast_title:
-        t.append(f"{podcast_title}  ", style=Style(color=FG_DIM))
-    t.append(title, style=Style(color=FG))
-    t.append(f"  {pos_str} ", style=Style(color=FG_DIM))
-    t.append(bar, style=Style(color=ACCENT))
-    t.append(f" {dur_str}", style=Style(color=FG_DIM))
-    return t
+    return Group(title_t, bar_t)
 
 
 # ── hints line ────────────────────────────────────────────────────────────────
@@ -290,10 +331,29 @@ def hints_line(search_mode: bool = False, query: str = "") -> Text:
         t.append(query, style=Style(color=FG))
         t.append("█", style=Style(color=ACCENT))
         t.append("  Enter=search  Esc=cancel", style=Style(color=FG_DIM))
-    else:
-        t.append(
-            "  j/k navigate · Enter episodes · p play latest · Space play"
-            " · ←→ seek · / search · f follow · Tab toggle · q quit",
-            style=Style(color=FG_DIM),
-        )
+        return t
+
+    _chip = Style(color="#0f172a", bgcolor=ACCENT_DIM, bold=True)
+    _lbl = Style(color=FG_DIM)
+    _sep = Style(color=BORDER_COLOR)
+
+    def chip(k: str) -> None:
+        t.append(f" {k} ", style=_chip)
+
+    def lbl(s: str) -> None:
+        t.append(f" {s}", style=_lbl)
+
+    def sep() -> None:
+        t.append("  ·  ", style=_sep)
+
+    t.append("  ", style=Style())
+    chip("j/k");   lbl("navigate");   sep()
+    chip("Enter"); lbl("episodes");   sep()
+    chip("p");     lbl("play latest"); sep()
+    chip("Space"); lbl("play/pause"); sep()
+    chip("←→");   lbl("seek");       sep()
+    chip("/");     lbl("search");     sep()
+    chip("f");     lbl("follow");     sep()
+    chip("Tab");   lbl("toggle");     sep()
+    chip("q");     lbl("quit")
     return t

@@ -1,14 +1,17 @@
-"""Image rendering: graphics protocols with half-block fallback.
+"""Image rendering: direct Kitty / iTerm2 protocols with half-block fallback.
 
-Protocol detection order: Kitty → iTerm2 → Sixel → half-block.
-`_detect()` is called at module load AND again from Renderer.enter_screen() so
-the terminal is definitely live before we make the final decision.
+Detection is done via environment variables (no terminal queries needed):
+  Kitty protocol: TERM=xterm-kitty, KITTY_WINDOW_ID, TERM_PROGRAM=WezTerm/ghostty
+  iTerm2 protocol: TERM_PROGRAM=iTerm.app, LC_TERMINAL=iTerm2
+
+The renderer embeds half-block art as a layout placeholder in the Rich panel,
+then overwrites that region with the real protocol image as a post-frame overlay.
+If the terminal only supports half-block the placeholder is the final output.
 """
 from __future__ import annotations
 
-import contextlib
-import io
-import sys
+import base64
+import os
 from io import BytesIO
 
 from PIL import Image as PILImage
@@ -16,34 +19,33 @@ from PIL import Image as PILImage
 # ── protocol detection ────────────────────────────────────────────────────────
 
 _protocol: str = "block"
-_ImageClass = None
+
+_KITTY_TERMS = {"xterm-kitty", "xterm-ghostty"}
+_KITTY_PROGRAMS = {"WezTerm", "ghostty"}
+_ITERM2_PROGRAMS = {"iTerm.app"}
+
+_KITTY_IMG_ID = 1  # fixed ID for the cover image slot
 
 
 def _detect() -> None:
-    """Detect the best available image protocol for the current terminal."""
-    global _protocol, _ImageClass
-    try:
-        from term_image.image import ITerm2Image, KittyImage, SixelImage
+    global _protocol
+    term = os.environ.get("TERM", "")
+    term_program = os.environ.get("TERM_PROGRAM", "")
+    lc_terminal = os.environ.get("LC_TERMINAL", "")
 
-        for name, cls in [
-            ("kitty", KittyImage),
-            ("iterm2", ITerm2Image),
-            ("sixel", SixelImage),
-        ]:
-            try:
-                if cls.is_supported():
-                    _protocol = name
-                    _ImageClass = cls
-                    return
-            except Exception:
-                continue
-    except ImportError:
-        pass
-    _protocol = "block"
-    _ImageClass = None
+    if (
+        term in _KITTY_TERMS
+        or os.environ.get("KITTY_WINDOW_ID")
+        or term_program in _KITTY_PROGRAMS
+    ):
+        _protocol = "kitty"
+    elif term_program in _ITERM2_PROGRAMS or lc_terminal == "iTerm2":
+        _protocol = "iterm2"
+    else:
+        _protocol = "block"
 
 
-_detect()  # initial probe (may be outside a real terminal; re-run from enter_screen)
+_detect()
 
 
 def protocol_name() -> str:
@@ -53,25 +55,26 @@ def protocol_name() -> str:
 # ── public API ────────────────────────────────────────────────────────────────
 
 def render_frame_lines(image_bytes: bytes, cols: int, rows: int) -> list[str]:
-    """Return a list of ANSI strings, one per terminal row, ready to splice into a frame.
+    """Return escape-code lines for the active protocol, or [] to signal fallback.
 
-    For graphics protocols the list has one element: the full escape sequence
-    (with embedded cursor positioning). For half-block it's one line per row.
-    Each entry must be written at the correct cursor position by the caller.
+    For Kitty/iTerm2 returns a single-element list containing the full sequence.
+    The renderer positions the cursor before writing it as an overlay.
     """
     if not image_bytes:
         return []
-
-    if _ImageClass is not None:
-        escaped = _capture_protocol(image_bytes, cols, rows)
-        if escaped:
-            return [escaped]  # single blob; caller positions cursor before writing
-
-    return render_half_block_lines(image_bytes, cols, rows)
+    if _protocol == "kitty":
+        seq = _render_kitty(image_bytes, cols, rows)
+        if seq:
+            return [seq]
+    elif _protocol == "iterm2":
+        seq = _render_iterm2(image_bytes, cols, rows)
+        if seq:
+            return [seq]
+    return []
 
 
 def render_half_block_lines(image_bytes: bytes, cols: int, rows: int) -> list[str]:
-    """Render as Unicode half-block characters with true-color ANSI codes."""
+    """Render as Unicode half-block characters with true-colour ANSI codes."""
     try:
         pil_img = PILImage.open(BytesIO(image_bytes)).convert("RGB")
         pil_img = pil_img.resize((cols, rows * 2), PILImage.LANCZOS)
@@ -93,34 +96,61 @@ def render_half_block_lines(image_bytes: bytes, cols: int, rows: int) -> list[st
         return []
 
 
-# ── legacy draw_at (used if anything still calls it directly) ─────────────────
+# ── protocol implementations ──────────────────────────────────────────────────
 
-def draw_at(image_bytes: bytes, row: int, col: int, cols: int, rows: int) -> None:
-    """Render image at terminal position (1-indexed). Prefer render_frame_lines."""
-    if not image_bytes:
-        return
-    lines = render_frame_lines(image_bytes, cols, rows)
-    if _ImageClass is not None and len(lines) == 1:
-        sys.stdout.write(f"\033[{row};{col}H")
-        sys.stdout.write(lines[0])
-        sys.stdout.flush()
-    else:
-        for i, line in enumerate(lines):
-            sys.stdout.write(f"\033[{row + i};{col}H{line}")
-        sys.stdout.flush()
+def _to_png(image_bytes: bytes, px: int = 256) -> bytes:
+    """Decode, resize to a square, and re-encode as PNG."""
+    img = PILImage.open(BytesIO(image_bytes)).convert("RGB")
+    img = img.resize((px, px), PILImage.LANCZOS)
+    buf = BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
 
 
-# ── internal ──────────────────────────────────────────────────────────────────
+def kitty_redisplay(cols: int, rows: int) -> str:
+    """Re-place an already-transmitted Kitty image (no data transfer)."""
+    return f"\033_Ga=p,q=2,i={_KITTY_IMG_ID},c={cols},r={rows}\033\\"
 
-def _capture_protocol(image_bytes: bytes, cols: int, rows: int) -> str:
-    """Capture term-image's escape-code output as a string."""
+
+def kitty_delete() -> str:
+    """Delete the Kitty cover image from terminal cache."""
+    return f"\033_Ga=d,q=2,i={_KITTY_IMG_ID}\033\\"
+
+
+def _render_kitty(image_bytes: bytes, cols: int, rows: int) -> str:
+    """Kitty terminal graphics protocol — APC escape (ESC_G...ESC\\).
+
+    Transmits the image with a fixed ID so subsequent frames can use
+    kitty_redisplay() instead of retransmitting the full PNG data.
+    """
     try:
-        pil_img = PILImage.open(BytesIO(image_bytes))
-        img = _ImageClass(pil_img)  # type: ignore[call-arg]
-        img.set_size(cols, rows)   # pin to exact cell area; no aspect-ratio drift
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            img.draw()
-        return buf.getvalue()
+        png = _to_png(image_bytes)
+        b64 = base64.standard_b64encode(png).decode()
+        chunk_size = 4096
+        chunks = [b64[i : i + chunk_size] for i in range(0, len(b64), chunk_size)]
+        parts: list[str] = []
+        for i, chunk in enumerate(chunks):
+            m = 0 if i == len(chunks) - 1 else 1
+            if i == 0:
+                # a=T transmit+display  f=100 PNG  q=2 quiet  i=ID  c/r cell dims
+                parts.append(
+                    f"\033_Ga=T,f=100,q=2,i={_KITTY_IMG_ID},c={cols},r={rows},m={m};{chunk}\033\\"
+                )
+            else:
+                parts.append(f"\033_Gm={m};{chunk}\033\\")
+        return "".join(parts)
+    except Exception:
+        return ""
+
+
+def _render_iterm2(image_bytes: bytes, cols: int, rows: int) -> str:
+    """iTerm2 inline image protocol — OSC 1337."""
+    try:
+        png = _to_png(image_bytes)
+        b64 = base64.standard_b64encode(png).decode()
+        return (
+            f"\033]1337;File=inline=1;width={cols};height={rows};"
+            f"preserveAspectRatio=1:{b64}\a"
+        )
     except Exception:
         return ""
