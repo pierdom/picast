@@ -171,6 +171,8 @@ class App:
                 await self._search(query)
         elif key == BACKSPACE:
             self.state.search_query = self.state.search_query[:-1]
+        elif key == SPACE:
+            self.state.search_query += " "
         elif len(key) == 1 and key.isprintable():
             self.state.search_query += key
 
