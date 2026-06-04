@@ -92,16 +92,15 @@ class Renderer:
         img_mod._detect()                        # re-probe now that stdout is a real tty
 
     def exit_screen(self) -> None:
-        # Close any open BSU frame (no-op on terminals that don't support it)
-        sys.stdout.write("\033[?2026l")
-        # Delete Kitty images still in the terminal cache
-        if img_mod.protocol_name() == "kitty" and self._kitty_card_cache:
-            for pid in list(self._kitty_card_cache):
-                sys.stdout.write(img_mod.kitty_delete(pid))
+        sys.stdout.write("\033[?2026l")           # close any open BSU
+        sys.stdout.write("\033[0m")               # reset SGR (colors, bold, etc.)
+        if img_mod.protocol_name() == "kitty":
+            sys.stdout.write("\033_Ga=d,d=a,q=2\033\\")  # delete all Kitty images
             self._kitty_card_cache.clear()
-        sys.stdout.write("\033[2J\033[H")        # clear alternate screen
-        sys.stdout.write("\033[?25h")            # show cursor
-        sys.stdout.write("\033[?1049l")          # restore main screen
+        sys.stdout.write("\033[2J\033[H")         # clear alternate screen
+        sys.stdout.write("\033[?1049l")           # restore main screen
+        sys.stdout.write("\033[?25h")             # show cursor (must be after screen restore)
+        sys.stdout.write("\033[0m")               # reset SGR on main screen too
         sys.stdout.flush()
 
     def render(self, state: RenderState) -> None:
