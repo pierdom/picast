@@ -26,7 +26,7 @@ from picast.ui import panels, theme
 
 # Thumbnail size inside each podcast card (terminal cells)
 CARD_THUMB_W = 10   # terminal cols per thumbnail
-CARD_THUMB_H = 5    # terminal rows per thumbnail
+CARD_THUMB_H = 6    # terminal rows per thumbnail
 
 # Column split ratios
 LEFT_RATIO = 3
@@ -304,7 +304,7 @@ class Renderer:
         # ── protocol image overlay for card thumbnails ────────────────────────
         image_overlay = ""
         if use_protocol and state.podcasts:
-            card_height = CARD_THUMB_H + 3   # border-top + thumb_h rows + meta row + border-bottom
+            card_height = CARD_THUMB_H + 2   # border-top + thumb_h rows + border-bottom
             visible_rows = max(1, list_height // card_height)
             cursor_row = state.podcast_cursor // 2
             total_rows = (len(state.podcasts) + 1) // 2

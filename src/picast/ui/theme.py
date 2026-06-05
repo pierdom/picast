@@ -1,18 +1,18 @@
 """Color and style constants."""
 from rich.theme import Theme
 
-# Palette
-ACCENT = "#c084fc"       # purple
-ACCENT_DIM = "#7c3aed"
-FG = "#e2e8f0"
+# Palette — minimalistic dark with orange accents
+ACCENT = "#f97316"       # orange-500
+ACCENT_DIM = "#ea580c"   # orange-600
+FG = "#f1f5f9"
 FG_DIM = "#64748b"
-BG_SELECT = "#1e293b"
+BG_SELECT = "#1c2533"
 SUCCESS = "#4ade80"
 WARNING = "#facc15"
 DANGER = "#f87171"
-BORDER_COLOR = "#334155"
-DETAIL_BORDER = "#1d4ed8"   # blue for the detail/right panel
-PLAYING_COLOR = "#c084fc"
+BORDER_COLOR = "#374151"
+DETAIL_BORDER = "#374151"
+PLAYING_COLOR = "#fb923c"  # orange-400
 NEW_COLOR = "#38bdf8"
 STARTED_COLOR = "#facc15"
 DONE_COLOR = "#4ade80"

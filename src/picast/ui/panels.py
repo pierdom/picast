@@ -60,7 +60,6 @@ def _status_icon(status: str) -> tuple[str, str]:
 
 
 # ── podcast card (2-column grid) ──────────────────────────────────────────────
-
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 
@@ -69,7 +68,6 @@ def _strip_html(text: str) -> str:
 
 
 def _word_wrap(text: str, width: int, max_lines: int) -> list[str]:
-    """Wrap text to width, returning at most max_lines lines."""
     lines: list[str] = []
     current = ""
     for word in text.split():
@@ -100,23 +98,22 @@ def _podcast_card(
 ) -> Panel:
     """Build a single podcast card Panel.
 
-    Layout (card_height = thumb_h + 3):
+    Layout (card_height = thumb_h + 2):
       ╭─────────────────────────────────────────╮
-      │ [img row 0] Title                    ★  │
-      │ [img row 1] Author                       │
-      │ [img row 2] Description line 1           │
-      │ [img row 3] Description line 2           │
-      │ [img row 4] Description line 3           │
-      │             Jun 04  ·  45 ep  ● NEW      │
+      │ [img 0] Title                        ★  │
+      │ [img 1] Author                           │
+      │ [img 2] Description line 1               │
+      │ [img 3] Description line 2               │
+      │ [img 4] Description line 3               │
+      │ [img 5] Jun 05  ● NEW                    │
       ╰─────────────────────────────────────────╯
     """
-    # card border(1 each side) + no panel padding → inner width = card_w - 2
-    text_w = max(1, card_w - thumb_w - 1 - 2)  # thumb + gap(1) + borders(2)
+    # thumb + gap(1) + borders(2) → remaining width for text
+    text_w = max(1, card_w - thumb_w - 1 - 2)
 
     title = podcast.get("title", "")
     author = podcast.get("author", "") or ""
     pub_ts = podcast.get("newestItemPubdate", 0) or 0
-    ep_count = podcast.get("episodeCount", 0) or 0
     raw_desc = (podcast.get("description", "") or "").strip()
     description = _strip_html(raw_desc)
 
@@ -141,8 +138,8 @@ def _podcast_card(
         overflow="ellipsis",
     )
 
-    # Rows 2 … thumb_h-1: description (word-wrapped)
-    desc_row_count = max(0, thumb_h - 2)
+    # Rows 2 … thumb_h-2: description (word-wrapped)
+    desc_row_count = max(0, thumb_h - 3)
     desc_lines_raw = _word_wrap(description, text_w, desc_row_count) if description else []
     while len(desc_lines_raw) < desc_row_count:
         desc_lines_raw.append("")
@@ -151,9 +148,16 @@ def _podcast_card(
         for ln in desc_lines_raw
     ]
 
-    text_lines: list[Text] = [title_text, author_text] + desc_texts
+    # Last row (thumb_h-1): date + NEW badge, sits alongside last image row
+    meta_t = Text(no_wrap=True, overflow="ellipsis")
+    if pub_ts:
+        meta_t.append(_fmt_date(pub_ts), style=Style(color=FG_DIM))
+    if pub_ts and (now - pub_ts) < _NEW_EPISODE_SECS:
+        meta_t.append("  ● NEW", style=Style(color=NEW_COLOR, bold=True))
 
-    # Build inner grid: [thumbnail | gap | text] × thumb_h rows
+    text_lines: list[Text] = [title_text, author_text] + desc_texts + [meta_t]
+
+    # Grid: [image | gap | text] × thumb_h rows — image fills every row
     grid = Table.grid(padding=0)
     grid.add_column(width=thumb_w)
     grid.add_column(width=1)
@@ -166,16 +170,6 @@ def _podcast_card(
         else:
             img_cell = Text(" " * thumb_w)
         grid.add_row(img_cell, Text(""), text_lines[i] if i < len(text_lines) else Text(""))
-
-    # Meta row (below image): last ep date · ep count  ● NEW
-    meta_t = Text(no_wrap=True, overflow="ellipsis")
-    if pub_ts:
-        meta_t.append("Last ep  ", style=Style(color=FG_DIM))
-        meta_t.append(_fmt_date(pub_ts), style=Style(color=FG))
-
-    if pub_ts and (now - pub_ts) < _NEW_EPISODE_SECS:
-        meta_t.append("  ● NEW", style=Style(color=NEW_COLOR, bold=True))
-    grid.add_row(Text(" " * thumb_w), Text(""), meta_t)
 
     if is_playing:
         border_style = PLAYING_COLOR
@@ -214,8 +208,8 @@ def podcast_cards_content(
     card_w = max(10, (total_width - 1) // 2)
     right_card_w = max(10, total_width - card_w - 1)
 
-    # Card height: ROUNDED border top+bottom (2) + thumb_h rows + 1 meta row = thumb_h + 3
-    card_height = thumb_h + 3
+    # Card height: ROUNDED border top+bottom (2) + thumb_h image rows
+    card_height = thumb_h + 2
 
     # Visible rows based on available height
     visible_rows = max(1, height // card_height)
