@@ -106,7 +106,7 @@ def _to_png(image_bytes: bytes, px: int = 256) -> bytes:
     img = PILImage.open(BytesIO(image_bytes)).convert("RGB")
     img = img.resize((px, px), PILImage.LANCZOS)
     buf = BytesIO()
-    img.save(buf, format="PNG", optimize=True)
+    img.save(buf, format="PNG")
     return buf.getvalue()
 
 

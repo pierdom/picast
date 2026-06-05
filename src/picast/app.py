@@ -33,6 +33,7 @@ class App:
         self._running = False
         self._api: PodcastIndexAPI | None = None
         self._pending_fetch: asyncio.Task | None = None
+        self._render_event: asyncio.Event | None = None
 
     # ── entry point ───────────────────────────────────────────────────────────
 
@@ -45,6 +46,8 @@ class App:
             return
 
         self._running = True
+        self._render_event = asyncio.Event()
+        self._render_event.set()  # render immediately on start
         loop = asyncio.get_running_loop()
 
         async with PodcastIndexAPI(api_key, api_secret) as api:
@@ -67,19 +70,38 @@ class App:
             finally:
                 self._shutdown()
 
+    # ── dirty / render ────────────────────────────────────────────────────────
+
+    def _mark_dirty(self) -> None:
+        if self._render_event is not None:
+            self._render_event.set()
+
     # ── loops ─────────────────────────────────────────────────────────────────
 
     async def _render_loop(self) -> None:
+        """Render only when state changes; fall back to 1 s tick for progress bar.
+
+        The render runs in a thread-pool executor so key events are never blocked
+        by the (potentially slow) Rich layout computation.  A 50 ms post-render
+        sleep lets rapid keypresses batch into one redraw instead of triggering
+        one expensive render per key.
+        """
         loop = asyncio.get_running_loop()
         while self._running:
+            try:
+                await asyncio.wait_for(self._render_event.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
+            self._render_event.clear()
             await loop.run_in_executor(None, self.renderer.render, self.state)
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.016)  # batch rapid updates, cap at ~60 fps
 
     async def _key_loop(self) -> None:
         async for key in self.keys:
             if not self._running:
                 break
             await self._handle_key(key)
+            self._mark_dirty()
 
     async def _player_poll_loop(self) -> None:
         loop = asyncio.get_running_loop()
@@ -103,9 +125,11 @@ class App:
                         dur or 0.0,
                     )
                     self.state.episode_statuses[ep_id] = store.episode_status(ep_id)
+                self._mark_dirty()
             else:
                 if self.state.is_playing:
                     self.state.is_playing = False
+                    self._mark_dirty()
             await asyncio.sleep(0.5)
 
     async def _initial_load(self) -> None:
@@ -198,6 +222,7 @@ class App:
         if self.state.selected_podcast and self.state.selected_podcast.get("id") == pid:
             return
         self.state.selected_podcast = p
+        self._mark_dirty()
 
         # Cancel any pending episode fetch
         if self._pending_fetch:
@@ -259,6 +284,7 @@ class App:
     async def _clear_status(self) -> None:
         await asyncio.sleep(2)
         self.state.status = ""
+        self._mark_dirty()
 
     async def _go_back(self) -> None:
         if self.state.view == "podcast":
@@ -274,7 +300,8 @@ class App:
         self.state.view = "following"
         self.state.selected_podcast = None
         if self.state.podcasts and self._api:
-            await self._prefetch_images(self.state.podcasts)
+            # Fire and forget — don't block key handling on image downloads
+            asyncio.ensure_future(self._prefetch_images(self.state.podcasts))
             for p in self.state.podcasts:
                 if not p.get("description") or not p.get("newestItemPubdate"):
                     asyncio.ensure_future(self._refresh_follow_metadata(p))
@@ -293,7 +320,8 @@ class App:
         self.state.view = "home"
         self.state.selected_podcast = None
         if self.state.podcasts and self._api:
-            await self._prefetch_images(self.state.podcasts)
+            # Fire and forget — don't block key handling on image downloads
+            asyncio.ensure_future(self._prefetch_images(self.state.podcasts))
             # Refresh metadata for any follow missing a description or last-episode date
             for p in self.state.podcasts:
                 if not p.get("description") or not p.get("newestItemPubdate"):
@@ -318,11 +346,18 @@ class App:
                     if self.state.selected_podcast and self.state.selected_podcast.get("id") == feed_id:
                         self.state.selected_podcast = updated
                     break
+            self._mark_dirty()
         except Exception:
             pass
 
+    async def _preprocess_and_mark_dirty(self, pid: int, data: bytes) -> None:
+        """Run PIL preprocessing in background, then trigger a render to show the image."""
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self.renderer.preprocess_image, pid, data)
+        self._mark_dirty()
+
     async def _prefetch_images(self, podcasts: list[dict]) -> None:
-        """Fetch images for a list of podcasts concurrently."""
+        """Fetch images for a list of podcasts concurrently; mark dirty as each arrives."""
         if not self._api:
             return
 
@@ -336,6 +371,9 @@ class App:
                     data = await self._api.fetch_image(url)  # type: ignore[union-attr]
                     if data:
                         self.state.cover_images[pid] = data
+                        self._mark_dirty()  # render immediately (placeholder visible)
+                        # PIL pre-encode runs in background; fires another render when done
+                        asyncio.ensure_future(self._preprocess_and_mark_dirty(pid, data))
                 except Exception:
                     pass
 
@@ -349,6 +387,8 @@ class App:
             data = await self._api.fetch_image(url)
             if data:
                 self.state.cover_images[pid] = data
+                self._mark_dirty()  # render immediately (placeholder visible)
+                asyncio.ensure_future(self._preprocess_and_mark_dirty(pid, data))
         except Exception:
             pass
 
@@ -371,7 +411,7 @@ class App:
         self.state.episodes = []
         self.state.episode_cursor = 0
         try:
-            episodes = await self._api.episodes(pid, max=50)
+            episodes = await self._api.episodes(pid, max=20)
             if self.state.selected_podcast and self.state.selected_podcast.get("id") == pid:
                 self.state.episodes = episodes
                 self.state.episode_statuses = {
@@ -388,6 +428,7 @@ class App:
                             if p.get("id") == pid:
                                 self.state.podcasts[i] = podcast
                                 break
+                self._mark_dirty()
         except Exception:
             pass
 
@@ -396,6 +437,7 @@ class App:
             return
         self.state.status = f'Searching "{query}"...'
         self.state.loading = True
+        self._mark_dirty()
         try:
             results = await self._api.search(query)
             self.state.podcasts = results
@@ -404,18 +446,19 @@ class App:
             self.state.view = "search"
             self.state.selected_podcast = None
             if results:
-                await self._prefetch_images(results)
+                asyncio.ensure_future(self._prefetch_images(results))
                 await self._on_podcast_cursor_change()
             else:
                 self.state.status = "No results"
-                await self._clear_status()
+                asyncio.ensure_future(self._clear_status())
         except Exception as exc:
             self.state.status = f"Error: {exc}"
-            await self._clear_status()
+            asyncio.ensure_future(self._clear_status())
         finally:
             self.state.loading = False
             if self.state.status.startswith("Searching"):
                 self.state.status = ""
+            self._mark_dirty()
 
     async def _play_latest(self, podcast: dict) -> None:
         """Fetch the latest episode of podcast and start playback immediately."""
@@ -424,18 +467,20 @@ class App:
         feed_id = podcast.get("id", 0)
         podcast_title = podcast.get("title", "")
         self.state.status = "Loading…"
+        self._mark_dirty()
         try:
             episodes = await self._api.episodes(feed_id, max=1)
             if not episodes:
                 self.state.status = "No episodes"
-                await self._clear_status()
+                asyncio.ensure_future(self._clear_status())
                 return
             self._play_episode(episodes[0], podcast_title=podcast_title)
         except Exception as exc:
             self.state.status = f"Error: {exc}"
-            await self._clear_status()
+            asyncio.ensure_future(self._clear_status())
         else:
             self.state.status = ""
+        self._mark_dirty()
 
     def _play_episode(self, episode: dict, podcast_title: str | None = None) -> None:
         ep_id = episode.get("id", 0)

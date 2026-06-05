@@ -70,9 +70,29 @@ class Renderer:
         self._console: Console | None = None
         self._console_size: tuple[int, int] = (0, 0)
         self._half_block_cache: dict[int, list[str]] = {}
-        self._kitty_card_cache: dict[int, bytes] = {}  # podcast_id → bytes in Kitty's cache
-        self._render_lock = threading.Lock()
+        self._kitty_card_cache: dict[int, bytes] = {}  # pid → img_bytes already sent to terminal
+        # pid → (img_bytes_ref, preencoded_escape_sequence)
+        self._img_seq_cache: dict[int, tuple[bytes, str]] = {}
+        self._lock = threading.Lock()   # guards render() vs exit_screen() stdout race
         self._exiting = False
+
+    def preprocess_image(self, pid: int, image_bytes: bytes) -> None:
+        """Pre-encode image data in a background thread so renders never touch PIL."""
+        proto = img_mod.protocol_name()
+        if proto in ("kitty", "iterm2"):
+            # Pre-encode the full escape sequence so _render_impl is PIL-free.
+            existing = self._img_seq_cache.get(pid)
+            if existing is None or existing[0] is not image_bytes:
+                lines = img_mod.render_frame_lines(
+                    image_bytes, CARD_THUMB_W, CARD_THUMB_H, kitty_id=pid
+                )
+                if lines:
+                    self._img_seq_cache[pid] = (image_bytes, lines[0])
+        else:
+            if pid not in self._half_block_cache:
+                self._half_block_cache[pid] = img_mod.render_half_block_lines(
+                    image_bytes, CARD_THUMB_W, CARD_THUMB_H
+                )
 
     def _get_console(self, cols: int, rows: int) -> Console:
         if (cols, rows) != self._console_size:
@@ -95,28 +115,27 @@ class Renderer:
         img_mod._detect()                        # re-probe now that stdout is a real tty
 
     def exit_screen(self) -> None:
-        with self._render_lock:
-            # _exiting=True prevents any new render from writing after we clean up.
-            # The lock itself ensures we wait for any in-progress render to finish.
+        with self._lock:
             self._exiting = True
-            sys.stdout.write("\033[?2026l")           # close any open BSU
-            sys.stdout.write("\033[0m")               # reset SGR (colors, bold, etc.)
-            if img_mod.protocol_name() == "kitty":
-                sys.stdout.write("\033_Ga=d,d=a,q=2\033\\")  # delete all Kitty images
-                self._kitty_card_cache.clear()
-            sys.stdout.write("\033[2J\033[H")         # clear alternate screen
-            sys.stdout.write("\033[?1049l")           # restore main screen
-            sys.stdout.write("\033[?25h")             # show cursor (after screen restore)
-            sys.stdout.write("\033[0m")               # reset SGR on main screen
-            sys.stdout.flush()
+        sys.stdout.write("\033[?2026l")           # close any open BSU
+        sys.stdout.write("\033[0m")               # reset SGR (colors, bold, etc.)
+        if img_mod.protocol_name() == "kitty":
+            sys.stdout.write("\033_Ga=d,d=a,q=2\033\\")  # delete all Kitty images
+            self._kitty_card_cache.clear()
+            self._img_seq_cache.clear()
+        sys.stdout.write("\033[2J\033[H")         # clear alternate screen
+        sys.stdout.write("\033[?1049l")           # restore main screen
+        sys.stdout.write("\033[?25h")             # show cursor (after screen restore)
+        sys.stdout.write("\033[0m")               # reset SGR on main screen
+        sys.stdout.flush()
 
     def render(self, state: RenderState) -> None:
-        with self._render_lock:
+        with self._lock:
             if self._exiting:
                 return
-            self._render_locked(state)
+            self._render_impl(state)
 
-    def _render_locked(self, state: RenderState) -> None:
+    def _render_impl(self, state: RenderState) -> None:
         try:
             sz = os.get_terminal_size()
             cols, rows = sz.columns, sz.lines
@@ -137,13 +156,7 @@ class Renderer:
         use_protocol = img_mod.protocol_name() in ("kitty", "iterm2")
         current_ids = {p.get("id", 0) for p in state.podcasts}
 
-        # Always keep half-block cache populated as fallback.
-        for p in state.podcasts:
-            pid = p.get("id", 0)
-            if pid and pid in state.cover_images and pid not in self._half_block_cache:
-                self._half_block_cache[pid] = img_mod.render_half_block_lines(
-                    state.cover_images[pid], CARD_THUMB_W, CARD_THUMB_H
-                )
+        # Half-block cache is pre-populated by preprocess_image(); evict stale entries.
         for stale_id in [k for k in self._half_block_cache if k not in current_ids]:
             del self._half_block_cache[stale_id]
 
@@ -320,23 +333,25 @@ class Renderer:
                     cursor_seq = f"\033[{term_row};{term_col}H"
 
                     if img_mod.protocol_name() == "kitty":
-                        if self._kitty_card_cache.get(pid) is not img_bytes:
-                            if pid in self._kitty_card_cache:
-                                image_overlay += img_mod.kitty_delete(pid)
-                            self._kitty_card_cache[pid] = img_bytes
-                            lines = img_mod.render_frame_lines(
-                                img_bytes, CARD_THUMB_W, CARD_THUMB_H, kitty_id=pid
-                            )
-                            if lines:
-                                image_overlay += cursor_seq + lines[0]
-                        else:
+                        if self._kitty_card_cache.get(pid) is img_bytes:
+                            # Already transmitted this exact image — just reposition it.
                             image_overlay += cursor_seq + img_mod.kitty_redisplay(
                                 CARD_THUMB_W, CARD_THUMB_H, kitty_id=pid
                             )
-                    else:  # iTerm2: always retransmit
-                        lines = img_mod.render_frame_lines(img_bytes, CARD_THUMB_W, CARD_THUMB_H)
-                        if lines:
-                            image_overlay += cursor_seq + lines[0]
+                        else:
+                            # Need to (re)transmit — only if preencoded sequence is ready.
+                            cached = self._img_seq_cache.get(pid)
+                            if cached and cached[0] is img_bytes:
+                                if pid in self._kitty_card_cache:
+                                    image_overlay += img_mod.kitty_delete(pid)
+                                image_overlay += cursor_seq + cached[1]
+                                self._kitty_card_cache[pid] = img_bytes
+                            # else: PIL not done yet — skip this frame; next render will show it.
+                    else:  # iTerm2: retransmit each frame from preencoded cache only.
+                        cached = self._img_seq_cache.get(pid)
+                        if cached and cached[0] is img_bytes:
+                            image_overlay += cursor_seq + cached[1]
+                        # else: PIL not done yet — skip this frame.
 
             # Evict Kitty slots for podcasts no longer in the visible window.
             if img_mod.protocol_name() == "kitty":
