@@ -275,6 +275,9 @@ class App:
         self.state.selected_podcast = None
         if self.state.podcasts and self._api:
             await self._prefetch_images(self.state.podcasts)
+            for p in self.state.podcasts:
+                if not p.get("description") or not p.get("newestItemPubdate"):
+                    asyncio.ensure_future(self._refresh_follow_metadata(p))
         if self.state.podcasts:
             await self._on_podcast_cursor_change()
 
@@ -291,9 +294,9 @@ class App:
         self.state.selected_podcast = None
         if self.state.podcasts and self._api:
             await self._prefetch_images(self.state.podcasts)
-            # Refresh metadata for any follow missing a description
+            # Refresh metadata for any follow missing a description or last-episode date
             for p in self.state.podcasts:
-                if not p.get("description"):
+                if not p.get("description") or not p.get("newestItemPubdate"):
                     asyncio.ensure_future(self._refresh_follow_metadata(p))
         if self.state.podcasts:
             await self._on_podcast_cursor_change()
@@ -375,6 +378,16 @@ class App:
                     ep["id"]: store.episode_status(ep["id"])
                     for ep in episodes if ep.get("id")
                 }
+                # Backfill missing last-episode date from the newest episode
+                if episodes and not podcast.get("newestItemPubdate"):
+                    ts = episodes[0].get("datePublished", 0) or 0
+                    if ts:
+                        podcast["newestItemPubdate"] = ts
+                        store.follow(podcast)
+                        for i, p in enumerate(self.state.podcasts):
+                            if p.get("id") == pid:
+                                self.state.podcasts[i] = podcast
+                                break
         except Exception:
             pass
 

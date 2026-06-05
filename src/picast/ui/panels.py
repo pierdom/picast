@@ -100,7 +100,7 @@ def _podcast_card(
 ) -> Panel:
     """Build a single podcast card Panel.
 
-    Layout (card_height = thumb_h + 4):
+    Layout (card_height = thumb_h + 3):
       ╭─────────────────────────────────────────╮
       │ [img row 0] Title                    ★  │
       │ [img row 1] Author                       │
@@ -108,7 +108,6 @@ def _podcast_card(
       │ [img row 3] Description line 2           │
       │ [img row 4] Description line 3           │
       │             Jun 04  ·  45 ep  ● NEW      │
-      │             ▶ Play                       │
       ╰─────────────────────────────────────────╯
     """
     # card border(1 each side) + no panel padding → inner width = card_w - 2
@@ -168,24 +167,15 @@ def _podcast_card(
             img_cell = Text(" " * thumb_w)
         grid.add_row(img_cell, Text(""), text_lines[i] if i < len(text_lines) else Text(""))
 
-    # Meta row (below image): date · ep count  ● NEW
-    parts: list[str] = []
-    if pub_ts:
-        parts.append(_fmt_date(pub_ts))
-    if ep_count:
-        parts.append(f"{ep_count} ep")
+    # Meta row (below image): last ep date · ep count  ● NEW
     meta_t = Text(no_wrap=True, overflow="ellipsis")
-    meta_t.append("  ·  ".join(parts) if parts else "", style=Style(color=FG_DIM))
+    if pub_ts:
+        meta_t.append("Last ep  ", style=Style(color=FG_DIM))
+        meta_t.append(_fmt_date(pub_ts), style=Style(color=FG))
+
     if pub_ts and (now - pub_ts) < _NEW_EPISODE_SECS:
         meta_t.append("  ● NEW", style=Style(color=NEW_COLOR, bold=True))
     grid.add_row(Text(" " * thumb_w), Text(""), meta_t)
-
-    # Play row
-    if is_playing:
-        play_t = Text("▶ Playing", style=Style(color=PLAYING_COLOR, bold=True))
-    else:
-        play_t = Text("  Play", style=Style(color=FG_DIM))
-    grid.add_row(Text(" " * thumb_w), Text(""), play_t)
 
     if is_playing:
         border_style = PLAYING_COLOR
@@ -224,8 +214,8 @@ def podcast_cards_content(
     card_w = max(10, (total_width - 1) // 2)
     right_card_w = max(10, total_width - card_w - 1)
 
-    # Card height: ROUNDED border top+bottom (2) + thumb_h rows + 1 meta row + 1 play row = thumb_h + 4
-    card_height = thumb_h + 4
+    # Card height: ROUNDED border top+bottom (2) + thumb_h rows + 1 meta row = thumb_h + 3
+    card_height = thumb_h + 3
 
     # Visible rows based on available height
     visible_rows = max(1, height // card_height)

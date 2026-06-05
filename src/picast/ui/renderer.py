@@ -170,8 +170,19 @@ class Renderer:
             view=state.view,
         )
 
+        if state.view == "following":
+            left_panel_title = f"[bold {theme.ACCENT}]Following[/]"
+        elif state.view == "search":
+            left_panel_title = f"[{theme.FG_DIM}]Search Results[/]"
+        elif state.following_count > 0:
+            left_panel_title = f"[bold {theme.ACCENT}]Following[/]"
+        else:
+            left_panel_title = f"[{theme.FG_DIM}]Trending[/]"
+
         left_panel = Panel(
             left_content,
+            title=left_panel_title,
+            title_align="left",
             border_style=theme.ACCENT_DIM if state.view != "podcast" else theme.BORDER_COLOR,
             box=richbox.ROUNDED,
             padding=(0, 1),
@@ -243,22 +254,6 @@ class Renderer:
         header = Text(no_wrap=True)
         badge = Style(bold=True, color="#ffffff", bgcolor=theme.ACCENT_DIM)
         header.append(" ▶ picast ", style=badge)
-        header.append("  ", style=Style())
-
-        if state.view == "following":
-            header.append("Following", style=Style(color=theme.ACCENT, bold=True))
-        elif state.view == "search":
-            header.append("Search Results", style=Style(color=theme.FG_DIM))
-        elif state.view == "podcast" and state.selected_podcast:
-            header.append(
-                state.selected_podcast.get("title", "")[:50],
-                style=Style(color=theme.FG_DIM, italic=True),
-            )
-        elif state.following_count > 0:
-            header.append("Following", style=Style(color=theme.ACCENT, bold=True))
-        else:
-            header.append("Trending", style=Style(color=theme.FG_DIM))
-
         if state.now_playing_episode:
             ep_icon = theme.PLAYING_ICON if state.is_playing else theme.PAUSED_ICON
             ep_title = state.now_playing_episode.get("title", "")[:45]
@@ -296,7 +291,7 @@ class Renderer:
         # ── protocol image overlay for card thumbnails ────────────────────────
         image_overlay = ""
         if use_protocol and state.podcasts:
-            card_height = CARD_THUMB_H + 4   # border-top + thumb_h rows + meta row + play row + border-bottom
+            card_height = CARD_THUMB_H + 3   # border-top + thumb_h rows + meta row + border-bottom
             visible_rows = max(1, list_height // card_height)
             cursor_row = state.podcast_cursor // 2
             total_rows = (len(state.podcasts) + 1) // 2
