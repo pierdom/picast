@@ -28,9 +28,9 @@ from picast.ui import panels, theme
 CARD_THUMB_W = 10   # terminal cols per thumbnail
 CARD_THUMB_H = 6    # terminal rows per thumbnail
 
-# Column split ratios
-LEFT_RATIO = 3
-RIGHT_RATIO = 2
+# Column split ratios (35% left / 65% right)
+LEFT_RATIO = 7
+RIGHT_RATIO = 13
 
 HEADER_HEIGHT = 1
 PLAYER_HEIGHT = 6   # ╭border╮ + title_line + progress_bar + blank + hints_line + ╰border╯
@@ -204,8 +204,8 @@ class Renderer:
         # ── right panel title ─────────────────────────────────────────────────
         if state.selected_podcast:
             pod_name = state.selected_podcast.get("title", "")
-            if len(pod_name) > 42:
-                pod_name = pod_name[:39] + "…"
+            if len(pod_name) > 80:
+                pod_name = pod_name[:77] + "…"
             detail_panel_title = f"[bold {theme.FG}]{pod_name}[/]"
         else:
             detail_panel_title = f"[{theme.FG_DIM}]Episodes[/]"
@@ -306,52 +306,47 @@ class Renderer:
         if use_protocol and state.podcasts:
             card_height = CARD_THUMB_H + 2   # border-top + thumb_h rows + border-bottom
             visible_rows = max(1, list_height // card_height)
-            cursor_row = state.podcast_cursor // 2
-            total_rows = (len(state.podcasts) + 1) // 2
-            start_row = max(0, min(total_rows - visible_rows, cursor_row - visible_rows // 2))
-            card_w = max(10, (left_inner - 1) // 2)
+            total_rows = len(state.podcasts)
+            start_row = max(0, min(total_rows - visible_rows, state.podcast_cursor - visible_rows // 2))
             visible_pids: set[int] = set()
 
             for vr in range(visible_rows):
-                grid_row = start_row + vr
-                for vc in range(2):
-                    pod_idx = grid_row * 2 + vc
-                    if pod_idx >= len(state.podcasts):
-                        continue
-                    pid = state.podcasts[pod_idx].get("id", 0)
-                    img_bytes = state.cover_images.get(pid)
-                    if not img_bytes:
-                        continue
-                    visible_pids.add(pid)
+                pod_idx = start_row + vr
+                if pod_idx >= len(state.podcasts):
+                    continue
+                pid = state.podcasts[pod_idx].get("id", 0)
+                img_bytes = state.cover_images.get(pid)
+                if not img_bytes:
+                    continue
+                visible_pids.add(pid)
 
-                    # Terminal position: row 1=header, row 2=panel border, row 3=panel content.
-                    # Card top border at row 3 + vr*card_height → thumbnail at +1.
-                    term_row = HEADER_HEIGHT + vr * card_height + 3
-                    # Column: panel border(1) + panel padding(1) + card border(1) + 1-indexed = 4
-                    # Right card: add card_w (left outer) + 1 (gap) + 1 (right border) = card_w+3
-                    term_col = 4 if vc == 0 else (card_w + 5)
-                    cursor_seq = f"\033[{term_row};{term_col}H"
+                # Terminal position: row 1=header, row 2=panel border, row 3=panel content.
+                # Card top border at row 3 + vr*card_height → thumbnail at +1.
+                term_row = HEADER_HEIGHT + vr * card_height + 3
+                # Column: panel border(1) + panel padding(1) + card border(1) + 1-indexed = 4
+                term_col = 4
+                cursor_seq = f"\033[{term_row};{term_col}H"
 
-                    if img_mod.protocol_name() == "kitty":
-                        if self._kitty_card_cache.get(pid) is img_bytes:
-                            # Already transmitted this exact image — just reposition it.
-                            image_overlay += cursor_seq + img_mod.kitty_redisplay(
-                                CARD_THUMB_W, CARD_THUMB_H, kitty_id=pid
-                            )
-                        else:
-                            # Need to (re)transmit — only if preencoded sequence is ready.
-                            cached = self._img_seq_cache.get(pid)
-                            if cached and cached[0] is img_bytes:
-                                if pid in self._kitty_card_cache:
-                                    image_overlay += img_mod.kitty_delete(pid)
-                                image_overlay += cursor_seq + cached[1]
-                                self._kitty_card_cache[pid] = img_bytes
-                            # else: PIL not done yet — skip this frame; next render will show it.
-                    else:  # iTerm2: retransmit each frame from preencoded cache only.
+                if img_mod.protocol_name() == "kitty":
+                    if self._kitty_card_cache.get(pid) is img_bytes:
+                        # Already transmitted this exact image — just reposition it.
+                        image_overlay += cursor_seq + img_mod.kitty_redisplay(
+                            CARD_THUMB_W, CARD_THUMB_H, kitty_id=pid
+                        )
+                    else:
+                        # Need to (re)transmit — only if preencoded sequence is ready.
                         cached = self._img_seq_cache.get(pid)
                         if cached and cached[0] is img_bytes:
+                            if pid in self._kitty_card_cache:
+                                image_overlay += img_mod.kitty_delete(pid)
                             image_overlay += cursor_seq + cached[1]
-                        # else: PIL not done yet — skip this frame.
+                            self._kitty_card_cache[pid] = img_bytes
+                        # else: PIL not done yet — skip this frame; next render will show it.
+                else:  # iTerm2: retransmit each frame from preencoded cache only.
+                    cached = self._img_seq_cache.get(pid)
+                    if cached and cached[0] is img_bytes:
+                        image_overlay += cursor_seq + cached[1]
+                    # else: PIL not done yet — skip this frame.
 
             # Evict Kitty slots for podcasts no longer in the visible window.
             if img_mod.protocol_name() == "kitty":

@@ -13,9 +13,9 @@ DANGER = "#f87171"
 BORDER_COLOR = "#374151"
 DETAIL_BORDER = "#374151"
 PLAYING_COLOR = "#fb923c"  # orange-400
-NEW_COLOR = "#38bdf8"
-STARTED_COLOR = "#facc15"
-DONE_COLOR = "#4ade80"
+NEW_COLOR = ACCENT        # orange-500 — unseen
+STARTED_COLOR = ACCENT_DIM  # orange-600 — in progress
+DONE_COLOR = FG_DIM       # muted — completed
 
 RICH_THEME = Theme({
     "accent": ACCENT,
@@ -32,8 +32,8 @@ RICH_THEME = Theme({
 PANEL_BORDER = "dim"
 PLAYING_ICON = "▶"
 PAUSED_ICON = "⏸"
-FOLLOW_ICON = "★"
-UNFOLLOW_ICON = "☆"
+FOLLOW_ICON = "♥"
+UNFOLLOW_ICON = "♡"
 NEW_ICON = "●"
 STARTED_ICON = "◑"
 DONE_ICON = "✓"

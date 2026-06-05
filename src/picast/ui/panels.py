@@ -120,13 +120,14 @@ def _podcast_card(
     # Row 0: title (+ star if following)
     title_text = Text(no_wrap=True, overflow="ellipsis")
     if is_following:
-        max_title = max(1, text_w - 2)
+        max_title = max(1, text_w - 3)
         truncated = title[:max_title] if len(title) > max_title else title
         title_text.append(truncated, style=Style(color=FG, bold=True))
         remaining = text_w - len(truncated)
-        if remaining > 1:
-            title_text.append(" " * (remaining - 1))
-            title_text.append("★", style=Style(color=ACCENT))
+        if remaining > 2:
+            title_text.append(" " * (remaining - 2))
+            title_text.append(FOLLOW_ICON, style=Style(color=ACCENT))
+            title_text.append(" ")
     else:
         title_text.append(title, style=Style(color=FG, bold=True))
 
@@ -193,7 +194,7 @@ def podcast_cards_content(
     now_playing_feed_id: int | None,
     view: str,
 ) -> Group:
-    """Render podcasts as a 2-column card grid."""
+    """Render podcasts as a single-column card list."""
     if not podcasts:
         return Group(
             Text(
@@ -204,73 +205,31 @@ def podcast_cards_content(
 
     now = int(time.time())
 
-    # Card sizing: two columns with a 1-col gap
-    card_w = max(10, (total_width - 1) // 2)
-    right_card_w = max(10, total_width - card_w - 1)
-
-    # Card height: ROUNDED border top+bottom (2) + thumb_h image rows
+    card_w = total_width
     card_height = thumb_h + 2
 
-    # Visible rows based on available height
     visible_rows = max(1, height // card_height)
 
-    # Scroll: keep cursor row centred
-    cursor_row = cursor // 2
-    total_rows = (len(podcasts) + 1) // 2
-    start_row = max(0, min(total_rows - visible_rows, cursor_row - visible_rows // 2))
+    total_rows = len(podcasts)
+    start_row = max(0, min(total_rows - visible_rows, cursor - visible_rows // 2))
 
-    # Determine focus: when view == "podcast" the card grid is not the active panel
-    cards_focused = view not in ("podcast",)
+    cards: list[object] = []
+    for idx in range(start_row, min(start_row + visible_rows, total_rows)):
+        p = podcasts[idx]
+        pid = p.get("id", 0)
+        cards.append(_podcast_card(
+            podcast=p,
+            image_lines=half_block_images.get(pid, []),
+            thumb_w=thumb_w,
+            thumb_h=thumb_h,
+            card_w=card_w,
+            is_selected=idx == cursor,
+            is_following=pid in following_ids,
+            now=now,
+            is_playing=pid == now_playing_feed_id,
+        ))
 
-    # Outer grid: left_card | gap | right_card
-    outer = Table.grid(padding=0)
-    outer.add_column(width=card_w)
-    outer.add_column(width=1)
-    outer.add_column(width=right_card_w)
-
-    for row_idx in range(start_row, start_row + visible_rows):
-        left_idx = row_idx * 2
-        right_idx = left_idx + 1
-
-        # Left card
-        if left_idx < len(podcasts):
-            p_left = podcasts[left_idx]
-            pid_left = p_left.get("id", 0)
-            left_card: object = _podcast_card(
-                podcast=p_left,
-                image_lines=half_block_images.get(pid_left, []),
-                thumb_w=thumb_w,
-                thumb_h=thumb_h,
-                card_w=card_w,
-                is_selected=cards_focused and left_idx == cursor,
-                is_following=pid_left in following_ids,
-                now=now,
-                is_playing=pid_left == now_playing_feed_id,
-            )
-        else:
-            left_card = Text("")
-
-        # Right card
-        if right_idx < len(podcasts):
-            p_right = podcasts[right_idx]
-            pid_right = p_right.get("id", 0)
-            right_card: object = _podcast_card(
-                podcast=p_right,
-                image_lines=half_block_images.get(pid_right, []),
-                thumb_w=thumb_w,
-                thumb_h=thumb_h,
-                card_w=right_card_w,
-                is_selected=cards_focused and right_idx == cursor,
-                is_following=pid_right in following_ids,
-                now=now,
-                is_playing=pid_right == now_playing_feed_id,
-            )
-        else:
-            right_card = Text("")
-
-        outer.add_row(left_card, Text(""), right_card)
-
-    return Group(outer)
+    return Group(*cards)
 
 
 # ── podcast list (legacy — kept for compatibility) ─────────────────────────────
@@ -337,7 +296,7 @@ def podcast_list_content(
             t = Text(no_wrap=True)
             t.append(label, style=Style(color=ACCENT, bold=True))
             t.append(dashes, style=Style(color=ACCENT_DIM))
-            table.add_row(Text("★", style=Style(color=ACCENT, bold=True)), t, Text(""))
+            table.add_row(Text(FOLLOW_ICON, style=Style(color=ACCENT, bold=True)), t, Text(""))
 
         elif kind == "spacer":
             table.add_row(Text(""), Text(""), Text(""))
@@ -409,13 +368,12 @@ def episode_list_content(
     has_focus: bool = True,
 ) -> Table:
     table = Table.grid(padding=(0, 0))
-    table.add_column(width=1)
-    table.add_column()
-    table.add_column(width=6, justify="right")
-    table.add_column(width=6, justify="right")
+    table.add_column(width=2)  # dot + space
+    table.add_column()         # title or meta
 
-    visible_start = max(0, cursor - height // 2)
-    visible = episodes[visible_start: visible_start + height]
+    visible_count = max(1, height // 2)
+    visible_start = max(0, cursor - visible_count // 2)
+    visible = episodes[visible_start: visible_start + visible_count]
 
     for i, ep in enumerate(visible):
         idx = visible_start + i
@@ -435,24 +393,26 @@ def episode_list_content(
 
         row_style = Style(bgcolor=BG_SELECT) if is_selected else Style()
         if is_selected:
-            if has_focus:
-                title_style = Style(color=FG, bold=True)
-            else:
-                # Dimmer selection when panel is not focused
-                title_style = Style(color=FG_DIM, bold=True)
+            title_style = Style(color=FG, bold=True) if has_focus else Style(color=FG_DIM, bold=True)
         else:
             title_style = Style(color=FG)
 
         table.add_row(
-            Text(dot, style=Style(color=dot_color)),
+            Text(dot + " ", style=Style(color=dot_color)),
             Text(title, style=title_style, overflow="ellipsis", no_wrap=True),
-            Text(date_str, style=Style(color=FG_DIM)),
-            Text(dur_str, style=Style(color=FG_DIM)),
+            style=row_style,
+        )
+
+        parts = [p for p in [date_str, dur_str] if p]
+        meta = "  " + "  ·  ".join(parts) if parts else ""
+        table.add_row(
+            Text(""),
+            Text(meta, style=Style(color=FG_DIM), no_wrap=True),
             style=row_style,
         )
 
     if not episodes:
-        table.add_row("", Text("No episodes", style=Style(color=FG_DIM, italic=True)), "", "")
+        table.add_row("", Text("No episodes", style=Style(color=FG_DIM, italic=True)))
 
     return table
 

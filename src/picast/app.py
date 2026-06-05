@@ -24,6 +24,10 @@ from picast.player import MpvPlayer
 from picast.ui.renderer import Renderer, RenderState
 
 
+def _sort_by_recency(podcasts: list[dict]) -> list[dict]:
+    return sorted(podcasts, key=lambda p: p.get("newestItemPubdate") or 0, reverse=True)
+
+
 class App:
     def __init__(self) -> None:
         self.state = RenderState()
@@ -159,6 +163,8 @@ class App:
                 self.player.seek(-10)
             case k if k == RIGHT:
                 self.player.seek(10)
+            case k if k == "l":
+                await self._go_right()
             case k if k == "/":
                 self.state.search_mode = True
                 self.state.search_query = ""
@@ -291,9 +297,13 @@ class App:
             # Return to card grid without clearing episodes (smooth UX)
             self.state.view = "home"
 
+    async def _go_right(self) -> None:
+        if self.state.view in ("home", "following", "search"):
+            await self._handle_enter()
+
     async def _show_following(self) -> None:
         follows = store.get_follows()
-        self.state.podcasts = list(follows.values())
+        self.state.podcasts = _sort_by_recency(list(follows.values()))
         self.state.following_ids = {int(k) for k in follows}
         self.state.following_count = len(self.state.podcasts)
         self.state.podcast_cursor = 0
@@ -314,7 +324,7 @@ class App:
         """Load followed podcasts as the home screen."""
         follows = store.get_follows()
         self.state.following_ids = {int(k) for k in follows}
-        self.state.podcasts = list(follows.values())
+        self.state.podcasts = _sort_by_recency(list(follows.values()))
         self.state.following_count = len(self.state.podcasts)
         self.state.podcast_cursor = 0
         self.state.view = "home"
@@ -346,6 +356,12 @@ class App:
                     if self.state.selected_podcast and self.state.selected_podcast.get("id") == feed_id:
                         self.state.selected_podcast = updated
                     break
+            self.state.podcasts = _sort_by_recency(self.state.podcasts)
+            # Fetch image if the refreshed metadata brought a URL we didn't have before
+            if feed_id not in self.state.cover_images:
+                url = updated.get("artwork", "") or updated.get("image", "")
+                if url and self._api:
+                    asyncio.ensure_future(self._fetch_image_for(feed_id, url))
             self._mark_dirty()
         except Exception:
             pass
