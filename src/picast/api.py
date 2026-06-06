@@ -79,7 +79,7 @@ class PodcastIndexAPI:
         if not url:
             return None
         try:
-            r = await self._client.get(url, headers={"User-Agent": _UA}, timeout=8)  # type: ignore[union-attr]
+            r = await self._client.get(url, headers={"User-Agent": _UA}, timeout=8, follow_redirects=True)  # type: ignore[union-attr]
             if r.is_success and r.content:
                 return r.content
         except Exception:
