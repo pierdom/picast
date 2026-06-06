@@ -79,7 +79,7 @@ class Renderer:
     def preprocess_image(self, pid: int, image_bytes: bytes) -> None:
         """Pre-encode image data in a background thread so renders never touch PIL."""
         proto = img_mod.protocol_name()
-        if proto in ("kitty", "iterm2"):
+        if proto in ("kitty", "iterm2", "sixel"):
             # Pre-encode the full escape sequence so _render_impl is PIL-free.
             existing = self._img_seq_cache.get(pid)
             if existing is None or existing[0] is not image_bytes:
@@ -153,7 +153,7 @@ class Renderer:
         list_height = main_height - 2    # ROUNDED panel top + bottom borders
 
         # ── image cache update ────────────────────────────────────────────────
-        use_protocol = img_mod.protocol_name() in ("kitty", "iterm2")
+        use_protocol = img_mod.protocol_name() in ("kitty", "iterm2", "sixel")
         current_ids = {p.get("id", 0) for p in state.podcasts}
 
         # Half-block cache is pre-populated by preprocess_image(); evict stale entries.
@@ -342,7 +342,7 @@ class Renderer:
                             image_overlay += cursor_seq + cached[1]
                             self._kitty_card_cache[pid] = img_bytes
                         # else: PIL not done yet — skip this frame; next render will show it.
-                else:  # iTerm2: retransmit each frame from preencoded cache only.
+                else:  # iTerm2 / sixel: retransmit each frame from preencoded cache only.
                     cached = self._img_seq_cache.get(pid)
                     if cached and cached[0] is img_bytes:
                         image_overlay += cursor_seq + cached[1]

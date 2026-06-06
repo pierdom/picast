@@ -1,8 +1,9 @@
-"""Image rendering: direct Kitty / iTerm2 protocols with half-block fallback.
+"""Image rendering: direct Kitty / iTerm2 / sixel protocols with half-block fallback.
 
 Detection is done via environment variables (no terminal queries needed):
-  Kitty protocol: TERM=xterm-kitty, KITTY_WINDOW_ID, TERM_PROGRAM=WezTerm/ghostty
+  Kitty protocol:  TERM=xterm-kitty/xterm-ghostty, KITTY_WINDOW_ID, TERM_PROGRAM=WezTerm/ghostty
   iTerm2 protocol: TERM_PROGRAM=iTerm.app, LC_TERMINAL=iTerm2
+  Sixel protocol:  TERM=foot/foot-extra
 
 The renderer embeds half-block art as a layout placeholder in the Rich panel,
 then overwrites that region with the real protocol image as a post-frame overlay.
@@ -12,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import os
+import sys
 from io import BytesIO
 
 from PIL import Image as PILImage
@@ -23,6 +25,7 @@ _protocol: str = "block"
 _KITTY_TERMS = {"xterm-kitty", "xterm-ghostty"}
 _KITTY_PROGRAMS = {"WezTerm", "ghostty"}
 _ITERM2_PROGRAMS = {"iTerm.app"}
+_SIXEL_TERMS = {"foot", "foot-extra"}
 
 _KITTY_IMG_ID = 1  # default Kitty image ID (kept for API compat)
 
@@ -41,6 +44,8 @@ def _detect() -> None:
         _protocol = "kitty"
     elif term_program in _ITERM2_PROGRAMS or lc_terminal == "iTerm2":
         _protocol = "iterm2"
+    elif term in _SIXEL_TERMS:
+        _protocol = "sixel"
     else:
         _protocol = "block"
 
@@ -59,7 +64,7 @@ def render_frame_lines(
 ) -> list[str]:
     """Return escape-code lines for the active protocol, or [] to signal fallback.
 
-    For Kitty/iTerm2 returns a single-element list containing the full sequence.
+    For Kitty/iTerm2/sixel returns a single-element list containing the full sequence.
     The renderer positions the cursor before writing it as an overlay.
     kitty_id lets callers use separate Kitty image slots (e.g. one per card).
     """
@@ -71,6 +76,10 @@ def render_frame_lines(
             return [seq]
     elif _protocol == "iterm2":
         seq = _render_iterm2(image_bytes, cols, rows)
+        if seq:
+            return [seq]
+    elif _protocol == "sixel":
+        seq = _render_sixel(image_bytes, cols, rows)
         if seq:
             return [seq]
     return []
@@ -155,5 +164,85 @@ def _render_iterm2(image_bytes: bytes, cols: int, rows: int) -> str:
             f"\033]1337;File=inline=1;width={cols};height={rows};"
             f"preserveAspectRatio=1:{b64}\a"
         )
+    except Exception:
+        return ""
+
+
+def _get_cell_pixels() -> tuple[int, int]:
+    """Return (cell_width_px, cell_height_px) via TIOCGWINSZ, or a sensible default."""
+    try:
+        import fcntl
+        import struct
+        import termios
+        data = fcntl.ioctl(sys.stdout.fileno(), termios.TIOCGWINSZ, b"\0" * 8)
+        _rows, _cols, xpix, ypix = struct.unpack("HHHH", data)
+        if _cols > 0 and _rows > 0 and xpix > 0 and ypix > 0:
+            return xpix // _cols, ypix // _rows
+    except Exception:
+        pass
+    return 8, 16
+
+
+def _render_sixel(image_bytes: bytes, cols: int, rows: int) -> str:
+    """DECSIXEL sequence sized to cols×rows terminal cells.
+
+    Pixel dimensions are derived from the terminal's reported cell size so the
+    image fills the reserved card area exactly regardless of font size.
+    """
+    try:
+        cell_w, cell_h = _get_cell_pixels()
+        px_w = cols * cell_w
+        px_h = rows * cell_h
+
+        img = PILImage.open(BytesIO(image_bytes)).convert("RGB")
+        img = img.resize((px_w, px_h), PILImage.LANCZOS)
+        img_p = img.quantize(colors=256, dither=0)
+        palette = img_p.getpalette() or ([0] * 768)
+        width, height = img_p.size
+        pixels = img_p.load()
+
+        buf: list[str] = ["\033Pq"]
+
+        # Color table: all 256 slots (unused entries are black — harmless)
+        for i in range(256):
+            r = palette[i * 3] * 100 // 255
+            g = palette[i * 3 + 1] * 100 // 255
+            b = palette[i * 3 + 2] * 100 // 255
+            buf.append(f"#{i};2;{r};{g};{b}")
+
+        # Encode 6-row bands
+        for band_y in range(0, height, 6):
+            band_h = min(6, height - band_y)
+
+            # Build per-color column bitmasks for this band
+            color_cols: dict[int, list[int]] = {}
+            for x in range(width):
+                for dy in range(band_h):
+                    c = pixels[x, band_y + dy]
+                    if c not in color_cols:
+                        color_cols[c] = [0] * width
+                    color_cols[c][x] |= 1 << dy
+
+            # Emit each color's row with RLE, separated by CR ($)
+            first = True
+            for ci, col_bits in color_cols.items():
+                if not first:
+                    buf.append("$")
+                first = False
+                buf.append(f"#{ci}")
+                x = 0
+                while x < width:
+                    run = 1
+                    while x + run < width and col_bits[x + run] == col_bits[x]:
+                        run += 1
+                    char = chr(63 + col_bits[x])
+                    buf.append(f"!{run}{char}" if run >= 4 else char * run)
+                    x += run
+
+            if band_y + 6 < height:
+                buf.append("-")  # GNL: advance to next band
+
+        buf.append("\033\\")
+        return "".join(buf)
     except Exception:
         return ""
