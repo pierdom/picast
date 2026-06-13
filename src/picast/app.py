@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import signal
 import sys
+import time
 
 from picast import config, store
 from picast.api import PodcastIndexAPI
@@ -22,6 +23,17 @@ from picast.keys import (
 )
 from picast.player import MpvPlayer
 from picast.ui.renderer import Renderer, RenderState
+
+
+# How long a stored follow's metadata stays fresh before we re-fetch it.
+_FOLLOW_REFRESH_TTL = 3600  # seconds
+
+
+def _follow_is_stale(podcast: dict) -> bool:
+    """True if a stored follow is missing core fields or its data has aged out."""
+    if not podcast.get("description") or not podcast.get("newestItemPubdate"):
+        return True
+    return time.time() - (podcast.get("refreshed_at") or 0) > _FOLLOW_REFRESH_TTL
 
 
 def _sort_by_recency(podcasts: list[dict]) -> list[dict]:
@@ -313,7 +325,7 @@ class App:
             # Fire and forget — don't block key handling on image downloads
             asyncio.ensure_future(self._prefetch_images(self.state.podcasts))
             for p in self.state.podcasts:
-                if not p.get("description") or not p.get("newestItemPubdate"):
+                if _follow_is_stale(p):
                     asyncio.ensure_future(self._refresh_follow_metadata(p))
         if self.state.podcasts:
             await self._on_podcast_cursor_change()
@@ -332,9 +344,9 @@ class App:
         if self.state.podcasts and self._api:
             # Fire and forget — don't block key handling on image downloads
             asyncio.ensure_future(self._prefetch_images(self.state.podcasts))
-            # Refresh metadata for any follow missing a description or last-episode date
+            # Refresh metadata for any follow that's missing core fields or stale
             for p in self.state.podcasts:
-                if not p.get("description") or not p.get("newestItemPubdate"):
+                if _follow_is_stale(p):
                     asyncio.ensure_future(self._refresh_follow_metadata(p))
         if self.state.podcasts:
             await self._on_podcast_cursor_change()
@@ -348,7 +360,20 @@ class App:
             full = await self._api.podcast(feed_id)
             if not full:
                 return
-            updated = {**podcast, **full, "followed_at": podcast.get("followed_at", 0)}
+            # byfeedid's newestItemPubdate is unreliable (often empty); fall back to
+            # lastUpdateTime, then the previously-stored value, so the card date is fresh.
+            newest = (
+                full.get("newestItemPubdate")
+                or full.get("lastUpdateTime")
+                or podcast.get("newestItemPubdate")
+            )
+            updated = {
+                **podcast,
+                **full,
+                "newestItemPubdate": newest,
+                "followed_at": podcast.get("followed_at", 0),
+                "refreshed_at": int(time.time()),
+            }
             store.follow(updated)
             for i, p in enumerate(self.state.podcasts):
                 if p.get("id") == feed_id:
@@ -434,16 +459,19 @@ class App:
                     ep["id"]: store.episode_status(ep["id"])
                     for ep in episodes if ep.get("id")
                 }
-                # Backfill missing last-episode date from the newest episode
-                if episodes and not podcast.get("newestItemPubdate"):
+                # The newest episode's date is the most accurate "last update" source.
+                # Update whenever it differs from the stored value.
+                if episodes:
                     ts = episodes[0].get("datePublished", 0) or 0
-                    if ts:
+                    if ts and ts != (podcast.get("newestItemPubdate") or 0):
                         podcast["newestItemPubdate"] = ts
-                        store.follow(podcast)
+                        if store.is_following(pid):
+                            store.follow(podcast)
                         for i, p in enumerate(self.state.podcasts):
                             if p.get("id") == pid:
                                 self.state.podcasts[i] = podcast
                                 break
+                        self.state.podcasts = _sort_by_recency(self.state.podcasts)
                 self._mark_dirty()
         except Exception:
             pass
