@@ -9,6 +9,7 @@ Discover and follow podcasts, browse episodes, and listen — all from the termi
 - Python 3.11+
 - [mpv](https://mpv.io) (audio playback)
 - A PodcastIndex API key (free at [podcastindex.org/login](https://podcastindex.org/login))
+- _Optional:_ [mpv-mpris](https://github.com/hoyon/mpv-mpris) for OS media controls (see below)
 
 ## Installation
 
@@ -91,6 +92,22 @@ picast auto-detects the best image protocol at startup:
 - **iTerm2** — full-colour (iTerm2)
 - **Half-block** — Unicode `▀` fallback for any other terminal
 
+## OS media controls (MPRIS)
+
+On Linux, picast integrates with the desktop's media controls (GNOME/KDE widgets,
+`playerctl`, keyboard media keys) — including the episode title and podcast cover
+art — when the [mpv-mpris](https://github.com/hoyon/mpv-mpris) plugin is installed:
+
+```bash
+# Arch
+sudo pacman -S mpv-mpris
+# Debian/Ubuntu
+sudo apt install mpv-mpris
+```
+
+picast auto-detects the plugin (`mpris.so`) and loads it on playback; no config
+needed. Without it, audio still plays — there's just no OS-level control surface.
+
 ## Data
 
 | Path | Contents |
@@ -98,3 +115,4 @@ picast auto-detects the best image protocol at startup:
 | `~/.config/picast/config.json` | API credentials |
 | `~/.local/share/picast/follows.json` | Followed podcasts |
 | `~/.local/share/picast/progress.json` | Episode playback positions |
+| `~/.local/share/picast/now_playing_cover` | Current cover, exposed to MPRIS art |

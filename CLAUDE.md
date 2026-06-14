@@ -92,6 +92,22 @@ All colors are in `ui/theme.py`. The palette uses orange accents:
 - Config: `~/.config/picast/config.json`
 - Follows: `~/.local/share/picast/follows.json`
 - Progress: `~/.local/share/picast/progress.json`
+- Now-playing cover: `~/.local/share/picast/now_playing_cover` (for MPRIS art)
+
+## OS media controls (MPRIS)
+
+mpv has no built-in MPRIS/D-Bus support — the optional `mpv-mpris` plugin
+(`mpris.so`) provides it. `player.py` probes the standard plugin locations
+(`_MPRIS_CANDIDATES`) and, if found, loads it via `--script=` on each `play()`.
+It also passes:
+
+- `--force-media-title=<episode — show>` → `xesam:title`
+- `--cover-art-files=<path>` → `mpris:artUrl` (first source mpv-mpris checks)
+
+`App._write_cover_file` dumps the already-cached cover bytes (`state.cover_images`)
+to the now-playing cover path; it's synchronous and does no network I/O, so it
+only works when the cover was prefetched (the normal case). No plugin → audio
+still plays, just no control surface.
 
 ## Running
 
@@ -106,3 +122,4 @@ uv run python -m picast
 - `httpx` — async HTTP for PodcastIndex API
 - `pillow` — image resize/encode for cover art
 - `mpv` (system) — audio playback via subprocess + IPC socket
+- `mpv-mpris` (system, optional) — `mpris.so` plugin for OS media controls

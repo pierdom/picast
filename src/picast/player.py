@@ -11,6 +11,24 @@ from pathlib import Path
 
 _SOCK = str(Path.home() / ".local" / "share" / "picast" / "mpv.sock")
 
+# Candidate locations for the mpv-mpris plugin (mpris.so). Loading it explicitly
+# means OS media controls (MPRIS/D-Bus) work regardless of the user's mpv.conf.
+_MPRIS_CANDIDATES = (
+    "/usr/lib/mpv-mpris/mpris.so",
+    "/usr/lib/x86_64-linux-gnu/mpv-mpris/mpris.so",
+    "/usr/lib64/mpv-mpris/mpris.so",
+    "/etc/mpv/scripts/mpris.so",
+    str(Path.home() / ".config" / "mpv" / "scripts" / "mpris.so"),
+    "/usr/share/mpv/scripts/mpris.so",
+)
+
+
+def _find_mpris() -> str | None:
+    for path in _MPRIS_CANDIDATES:
+        if os.path.exists(path):
+            return path
+    return None
+
 
 class MpvPlayer:
     def __init__(self) -> None:
@@ -18,10 +36,18 @@ class MpvPlayer:
         self._lock = threading.Lock()
         self._paused = False
         self._current_episode_id: int | None = None
+        self._mpris = _find_mpris()
 
     # ── public ────────────────────────────────────────────────────────────────
 
-    def play(self, url: str, episode_id: int = 0, start_pos: float = 0.0) -> None:
+    def play(
+        self,
+        url: str,
+        episode_id: int = 0,
+        start_pos: float = 0.0,
+        title: str | None = None,
+        cover_path: str | None = None,
+    ) -> None:
         with self._lock:
             self._kill()
             try:
@@ -32,6 +58,13 @@ class MpvPlayer:
                 "mpv", "--no-video", "--really-quiet",
                 f"--input-ipc-server={_SOCK}",
             ]
+            if self._mpris:
+                args.append(f"--script={self._mpris}")
+            if title:
+                args.append(f"--force-media-title={title}")
+            if cover_path:
+                # mpv-mpris reads mpris:artUrl from the cover-art-files property.
+                args.append(f"--cover-art-files={cover_path}")
             if start_pos > 0:
                 args.append(f"--start={start_pos}")
             args.append(url)

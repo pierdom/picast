@@ -5,6 +5,7 @@ import asyncio
 import signal
 import sys
 import time
+from pathlib import Path
 
 from picast import config, store
 from picast.api import PodcastIndexAPI
@@ -27,6 +28,9 @@ from picast.ui.renderer import Renderer, RenderState
 
 # How long a stored follow's metadata stays fresh before we re-fetch it.
 _FOLLOW_REFRESH_TTL = 3600  # seconds
+
+# Where the now-playing cover is written for mpv to expose as MPRIS art.
+_COVER_FILE = Path.home() / ".local" / "share" / "picast" / "now_playing_cover"
 
 
 def _follow_is_stale(podcast: dict) -> bool:
@@ -534,17 +538,48 @@ class App:
             asyncio.ensure_future(self._clear_status())
             return
         start_pos = store.episode_position(ep_id)
-        self.player.play(url, episode_id=ep_id, start_pos=start_pos)
-        self.state.now_playing_episode = episode
         if podcast_title is not None:
             self.state.now_playing_podcast_title = podcast_title
         elif self.state.selected_podcast:
             self.state.now_playing_podcast_title = self.state.selected_podcast.get("title", "")
         else:
             self.state.now_playing_podcast_title = ""
+        ep_title = episode.get("title", "")
+        show = self.state.now_playing_podcast_title
+        media_title = f"{ep_title} — {show}" if show else ep_title
+        cover_path = self._write_cover_file(episode)
+        self.player.play(
+            url,
+            episode_id=ep_id,
+            start_pos=start_pos,
+            title=media_title,
+            cover_path=cover_path,
+        )
+        self.state.now_playing_episode = episode
         self.state.is_playing = True
         self.state.playback_position = start_pos
         self.state.playback_duration = episode.get("duration", 0) or 0.0
+
+    def _write_cover_file(self, episode: dict) -> str | None:
+        """Materialize the now-playing podcast cover to disk for mpv's MPRIS art.
+
+        Uses the already-fetched bytes in state.cover_images (prefetched for the
+        card lists), so this stays synchronous and does no network I/O.
+        """
+        feed_id = (
+            episode.get("feedId")
+            or (self.state.selected_podcast or {}).get("id")
+            or self.state.episodes_for_pod
+        )
+        data = self.state.cover_images.get(feed_id) if feed_id else None
+        if not data:
+            return None
+        try:
+            _COVER_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _COVER_FILE.write_bytes(data)
+            return str(_COVER_FILE)
+        except Exception:
+            return None
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
