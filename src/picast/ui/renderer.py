@@ -26,7 +26,7 @@ from picast.ui import panels, theme
 
 # Thumbnail size inside each podcast card (terminal cells)
 CARD_THUMB_W = 10   # terminal cols per thumbnail
-CARD_THUMB_H = 6    # terminal rows per thumbnail
+CARD_THUMB_H = 5    # terminal rows per thumbnail
 
 # Column split ratios (40% left / 60% right)
 LEFT_RATIO = 8

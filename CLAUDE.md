@@ -45,7 +45,7 @@ PLAYER_HEIGHT = 6 rows
 ```
 
 Left panel: `padding=(0, 1)`, `ROUNDED` border → `left_inner = left_allocated - 4`.  
-Podcast cards: single column, each `CARD_THUMB_H + 2` rows tall (`CARD_THUMB_H = 6`).
+Podcast cards: single column, each `CARD_THUMB_H + 2` rows tall (`CARD_THUMB_H = 5`).
 
 Right panel (episode list): each episode is 2 rows (title + meta). The **selected**
 episode also renders its description (HTML-stripped, word-wrapped, capped at
