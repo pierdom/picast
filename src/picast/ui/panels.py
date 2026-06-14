@@ -104,7 +104,7 @@ def _podcast_card(
       │ [img 1] Author                           │
       │ [img 2] Description line 1               │
       │ [img 3] Description line 2               │
-      │ [img 4] Description line 3               │
+      │ [img 4]                                  │
       │ [img 5] Jun 05  ● NEW                    │
       ╰─────────────────────────────────────────╯
     """
@@ -139,8 +139,8 @@ def _podcast_card(
         overflow="ellipsis",
     )
 
-    # Rows 2 … thumb_h-2: description (word-wrapped)
-    desc_row_count = max(0, thumb_h - 3)
+    # Rows 2 … thumb_h-3: description (word-wrapped), leaving a blank row before meta
+    desc_row_count = max(0, thumb_h - 4)
     desc_lines_raw = _word_wrap(description, text_w, desc_row_count) if description else []
     while len(desc_lines_raw) < desc_row_count:
         desc_lines_raw.append("")
@@ -156,7 +156,8 @@ def _podcast_card(
     if pub_ts and (now - pub_ts) < _NEW_EPISODE_SECS:
         meta_t.append("  ● NEW", style=Style(color=NEW_COLOR, bold=True))
 
-    text_lines: list[Text] = [title_text, author_text] + desc_texts + [meta_t]
+    # Blank spacer keeps the meta row pinned to the card's last row.
+    text_lines: list[Text] = [title_text, author_text] + desc_texts + [Text(""), meta_t]
 
     # Grid: [image | gap | text] × thumb_h rows — image fills every row
     grid = Table.grid(padding=0)

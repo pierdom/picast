@@ -11,6 +11,7 @@ from picast import config, store
 from picast.api import PodcastIndexAPI
 from picast.keys import (
     BACKSPACE,
+    BACKTAB,
     CTRL_C,
     DOWN,
     ENTER,
@@ -196,15 +197,9 @@ class App:
             case k if k == ESCAPE or k == "h":
                 await self._go_back()
             case k if k == TAB:
-                # Toggle between following and home
-                if self.state.view in ("home", "search", "following"):
-                    if self.state.view == "following":
-                        await self._load_following_home()
-                    else:
-                        await self._show_following()
-                elif self.state.view == "podcast":
-                    # Tab in episode view goes back to card grid
-                    await self._go_back()
+                await self._switch_pane(1)
+            case k if k == BACKTAB:
+                await self._switch_pane(-1)
 
     async def _handle_search_key(self, key: str) -> None:
         if key == ESCAPE:
@@ -307,6 +302,17 @@ class App:
         await asyncio.sleep(2)
         self.state.status = ""
         self._mark_dirty()
+
+    async def _switch_pane(self, direction: int) -> None:
+        """Move focus between the podcast (left) and episode (right) panes.
+
+        With two panes Tab and Shift+Tab are mirror images of the same toggle;
+        `direction` (+1 forward / -1 back) is kept for clarity and future panes.
+        """
+        if self.state.view == "podcast":
+            await self._go_back()
+        else:
+            await self._go_right()
 
     async def _go_back(self) -> None:
         if self.state.view == "podcast":

@@ -160,6 +160,11 @@ def _render_iterm2(image_bytes: bytes, cols: int, rows: int) -> str:
         return ""
 
 
+def cell_pixels() -> tuple[int, int]:
+    """Public accessor for the terminal cell size in pixels (width, height)."""
+    return _get_cell_pixels()
+
+
 def _get_cell_pixels() -> tuple[int, int]:
     """Return (cell_width_px, cell_height_px) via TIOCGWINSZ, or a sensible default."""
     try:

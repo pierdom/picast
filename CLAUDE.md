@@ -40,7 +40,7 @@ _player_poll_loop — polls mpv IPC for playback position every 500 ms
 
 ```
 HEADER_HEIGHT = 1 row
-main area     = rows - 7 rows  (split: LEFT_RATIO=7 / RIGHT_RATIO=13 → 35% / 65%)
+main area     = rows - 7 rows  (split: LEFT_RATIO=8 / RIGHT_RATIO=12 → 40% / 60%)
 PLAYER_HEIGHT = 6 rows
 ```
 
@@ -80,7 +80,7 @@ If `HEADER_HEIGHT`, `PLAYER_HEIGHT`, or panel padding change, these offsets must
 | `/` | Enter search mode |
 | `f` | Follow / unfollow |
 | `F` | Show following list |
-| `Tab` | Toggle home ↔ following |
+| `Tab` / `Shift+Tab` | Switch focus between podcast and episode panes |
 | `p` | Play latest episode |
 | `q` / `Ctrl-C` | Quit |
 

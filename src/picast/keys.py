@@ -17,6 +17,7 @@ ENTER = "enter"
 SPACE = "space"
 ESCAPE = "escape"
 TAB = "tab"
+BACKTAB = "backtab"   # Shift+Tab
 BACKSPACE = "backspace"
 CTRL_C = "ctrl_c"
 
@@ -30,6 +31,7 @@ _ESC_MAP: dict[bytes, str] = {
     b"\x1b[F": "end",
     b"\x1b[5~": "page_up",
     b"\x1b[6~": "page_down",
+    b"\x1b[Z": BACKTAB,
 }
 
 

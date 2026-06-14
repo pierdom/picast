@@ -28,9 +28,9 @@ from picast.ui import panels, theme
 CARD_THUMB_W = 10   # terminal cols per thumbnail
 CARD_THUMB_H = 6    # terminal rows per thumbnail
 
-# Column split ratios (35% left / 65% right)
-LEFT_RATIO = 7
-RIGHT_RATIO = 13
+# Column split ratios (40% left / 60% right)
+LEFT_RATIO = 8
+RIGHT_RATIO = 12
 
 HEADER_HEIGHT = 1
 PLAYER_HEIGHT = 6   # ╭border╮ + title_line + progress_bar + blank + hints_line + ╰border╯
@@ -74,24 +74,58 @@ class Renderer:
         self._img_seq_cache: dict[int, tuple[bytes, str]] = {}
         self._lock = threading.Lock()   # guards render() vs exit_screen() stdout race
         self._exiting = False
+        self._thumb_dims: tuple[int, int] | None = None
+
+    def _thumb_cells(self) -> tuple[int, int]:
+        """Largest cell box that renders the cover *square* in pixels, within the card.
+
+        Terminal cells are typically ~2× taller than wide, so a CARD_THUMB_W×
+        CARD_THUMB_H box stretches a square image. We derive the box from the actual
+        cell pixel size: pick the dimensions whose pixel extents are closest to equal
+        while fitting inside CARD_THUMB_W × CARD_THUMB_H. Cached — cell size is stable
+        within a session.
+        """
+        if self._thumb_dims is None:
+            cell_w, cell_h = img_mod.cell_pixels()
+            cols = CARD_THUMB_W
+            rows = max(1, round(cols * cell_w / cell_h))
+            if rows > CARD_THUMB_H:
+                rows = CARD_THUMB_H
+                cols = max(1, min(CARD_THUMB_W, round(rows * cell_h / cell_w)))
+            self._thumb_dims = (cols, rows)
+        return self._thumb_dims
 
     def preprocess_image(self, pid: int, image_bytes: bytes) -> None:
         """Pre-encode image data in a background thread so renders never touch PIL."""
+        cols, rows = self._thumb_cells()
         proto = img_mod.protocol_name()
         if proto in ("kitty", "iterm2", "sixel"):
             # Pre-encode the full escape sequence so _render_impl is PIL-free.
             existing = self._img_seq_cache.get(pid)
             if existing is None or existing[0] is not image_bytes:
                 lines = img_mod.render_frame_lines(
-                    image_bytes, CARD_THUMB_W, CARD_THUMB_H, kitty_id=pid
+                    image_bytes, cols, rows, kitty_id=pid
                 )
                 if lines:
                     self._img_seq_cache[pid] = (image_bytes, lines[0])
         else:
             if pid not in self._half_block_cache:
-                self._half_block_cache[pid] = img_mod.render_half_block_lines(
-                    image_bytes, CARD_THUMB_W, CARD_THUMB_H
-                )
+                lines = img_mod.render_half_block_lines(image_bytes, cols, rows)
+                self._half_block_cache[pid] = self._pad_block(lines, cols, rows)
+
+    @staticmethod
+    def _pad_block(lines: list[str], cols: int, rows: int) -> list[str]:
+        """Center half-block art (cols×rows) inside the CARD_THUMB_W×CARD_THUMB_H box."""
+        if not lines:
+            return lines
+        col_off = (CARD_THUMB_W - cols) // 2
+        row_off = (CARD_THUMB_H - rows) // 2
+        pad_left = " " * col_off
+        blank = " " * CARD_THUMB_W
+        out = [blank] * row_off + [pad_left + ln for ln in lines]
+        while len(out) < CARD_THUMB_H:
+            out.append(blank)
+        return out[:CARD_THUMB_H]
 
     def _get_console(self, cols: int, rows: int) -> Console:
         if (cols, rows) != self._console_size:
@@ -309,6 +343,10 @@ class Renderer:
             visible_rows = max(1, list_height // card_height)
             total_rows = len(state.podcasts)
             start_row = max(0, min(total_rows - visible_rows, state.podcast_cursor - visible_rows // 2))
+            # Square image dims may be smaller than the card box — center within it.
+            img_cols, img_rows = self._thumb_cells()
+            row_off = (CARD_THUMB_H - img_rows) // 2
+            col_off = (CARD_THUMB_W - img_cols) // 2
             for vr in range(visible_rows):
                 pod_idx = start_row + vr
                 if pod_idx >= len(state.podcasts):
@@ -319,10 +357,10 @@ class Renderer:
                     continue
 
                 # Terminal position: row 1=header, row 2=panel border, row 3=panel content.
-                # Card top border at row 3 + vr*card_height → thumbnail at +1.
-                term_row = HEADER_HEIGHT + vr * card_height + 3
+                # Card top border at row 3 + vr*card_height → thumbnail at +1, then center.
+                term_row = HEADER_HEIGHT + vr * card_height + 3 + row_off
                 # Column: panel border(1) + panel padding(1) + card border(1) + 1-indexed = 4
-                term_col = 4
+                term_col = 4 + col_off
                 cursor_seq = f"\033[{term_row};{term_col}H"
 
                 # Re-transmit the image every frame from the pre-encoded cache.
