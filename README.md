@@ -52,7 +52,7 @@ export PODCAST_INDEX_API_SECRET=your_secret
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Left pane (35%): podcast cards sorted by most recent episode. Right pane (65%): episode list for the selected podcast.
+Left pane (35%): podcast cards sorted by most recent episode. Right pane (65%): episode list for the selected podcast. The selected episode expands to show its description, which collapses again as you scroll.
 
 ## Key bindings
 

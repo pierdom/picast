@@ -47,6 +47,12 @@ PLAYER_HEIGHT = 6 rows
 Left panel: `padding=(0, 1)`, `ROUNDED` border → `left_inner = left_allocated - 4`.  
 Podcast cards: single column, each `CARD_THUMB_H + 2` rows tall (`CARD_THUMB_H = 6`).
 
+Right panel (episode list): each episode is 2 rows (title + meta). The **selected**
+episode also renders its description (HTML-stripped, word-wrapped, capped at
+`_DESC_MAX_LINES`) below the meta. Because episodes have variable height,
+`episode_list_content` uses a budget-based scroll window: it always keeps the
+selected episode's full block on screen, then grows outward to fill `height`.
+
 ## State
 
 `RenderState` (dataclass) in `renderer.py` is the single source of truth passed into every render. `App` mutates it from the event loop; `Renderer` only reads it.

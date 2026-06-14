@@ -359,6 +359,10 @@ def podcast_list_content(
 
 # ── episode list ──────────────────────────────────────────────────────────────
 
+# Max description lines shown under the selected episode.
+_DESC_MAX_LINES = 8
+
+
 def episode_list_content(
     episodes: list[dict],
     cursor: int,
@@ -366,17 +370,52 @@ def episode_list_content(
     playing_episode_id: int | None,
     height: int = 20,
     has_focus: bool = True,
+    width: int = 40,
 ) -> Table:
     table = Table.grid(padding=(0, 0))
     table.add_column(width=2)  # dot + space
-    table.add_column()         # title or meta
+    table.add_column()         # title / meta / description
 
-    visible_count = max(1, height // 2)
-    visible_start = max(0, cursor - visible_count // 2)
-    visible = episodes[visible_start: visible_start + visible_count]
+    if not episodes:
+        table.add_row("", Text("No episodes", style=Style(color=FG_DIM, italic=True)))
+        return table
 
-    for i, ep in enumerate(visible):
-        idx = visible_start + i
+    # Description shown only for the selected episode, word-wrapped to the
+    # text column (2-space indent inside column 2). Capped so it can't push the
+    # whole list off-screen.
+    desc_width = max(10, width - 2)
+    max_desc = max(0, min(_DESC_MAX_LINES, height - 2))
+    desc_lines: list[str] = []
+    if 0 <= cursor < len(episodes) and max_desc:
+        raw = (episodes[cursor].get("description", "") or "").strip()
+        desc = _strip_html(raw)
+        if desc:
+            desc_lines = _word_wrap(desc, desc_width, max_desc)
+
+    def ep_height(idx: int) -> int:
+        # title + meta (2 rows), plus description rows for the selected episode.
+        return 2 + (len(desc_lines) if idx == cursor else 0)
+
+    # Budget-based window: always include the selected episode's full block,
+    # then grow outward (above first, then below) until the height is filled.
+    start = cursor
+    end = cursor + 1
+    used = ep_height(cursor)
+    while True:
+        grew = False
+        if start > 0 and used + ep_height(start - 1) <= height:
+            start -= 1
+            used += ep_height(start)
+            grew = True
+        if end < len(episodes) and used + ep_height(end) <= height:
+            used += ep_height(end)
+            end += 1
+            grew = True
+        if not grew:
+            break
+
+    for idx in range(start, end):
+        ep = episodes[idx]
         ep_id = ep.get("id", 0)
         is_selected = idx == cursor
         is_playing = ep_id == playing_episode_id
@@ -411,8 +450,13 @@ def episode_list_content(
             style=row_style,
         )
 
-    if not episodes:
-        table.add_row("", Text("No episodes", style=Style(color=FG_DIM, italic=True)))
+        if is_selected:
+            for line in desc_lines:
+                table.add_row(
+                    Text(""),
+                    Text("  " + line, style=Style(color=FG_DIM, italic=True), no_wrap=True),
+                    style=row_style,
+                )
 
     return table
 

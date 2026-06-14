@@ -150,6 +150,8 @@ class Renderer:
 
         left_allocated = (cols - 1) * LEFT_RATIO // (LEFT_RATIO + RIGHT_RATIO)
         left_inner = left_allocated - 4   # ROUNDED borders(2) + padding each side(2)
+        right_allocated = (cols - 1) - left_allocated
+        right_inner = right_allocated - 4  # ROUNDED borders(2) + padding each side(2)
         list_height = main_height - 2    # ROUNDED panel top + bottom borders
 
         # ── image cache update ────────────────────────────────────────────────
@@ -221,6 +223,7 @@ class Renderer:
             playing_episode_id=playing_ep_id,
             height=list_height,
             has_focus=state.view == "podcast",
+            width=right_inner - 2,  # minus the 2-col status-dot column
         )
 
         right_panel = Panel(
