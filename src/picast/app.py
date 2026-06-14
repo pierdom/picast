@@ -409,6 +409,13 @@ class App:
         async def fetch_one(p: dict) -> None:
             pid = p.get("id", 0)
             if pid in self.state.cover_images:
+                # Covers persist in cover_images, but the renderer's per-view image
+                # caches are evicted when the visible set changes (e.g. during a
+                # search). Re-run the idempotent preprocess so they're repopulated
+                # on return — otherwise cards render blank. See renderer eviction.
+                asyncio.ensure_future(
+                    self._preprocess_and_mark_dirty(pid, self.state.cover_images[pid])
+                )
                 return
             url = p.get("artwork", "") or p.get("image", "")
             if url:
