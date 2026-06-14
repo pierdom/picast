@@ -70,7 +70,6 @@ class Renderer:
         self._console: Console | None = None
         self._console_size: tuple[int, int] = (0, 0)
         self._half_block_cache: dict[int, list[str]] = {}
-        self._kitty_card_cache: dict[int, bytes] = {}  # pid → img_bytes already sent to terminal
         # pid → (img_bytes_ref, preencoded_escape_sequence)
         self._img_seq_cache: dict[int, tuple[bytes, str]] = {}
         self._lock = threading.Lock()   # guards render() vs exit_screen() stdout race
@@ -121,7 +120,6 @@ class Renderer:
         sys.stdout.write("\033[0m")               # reset SGR (colors, bold, etc.)
         if img_mod.protocol_name() == "kitty":
             sys.stdout.write("\033_Ga=d,d=a,q=2\033\\")  # delete all Kitty images
-            self._kitty_card_cache.clear()
             self._img_seq_cache.clear()
         sys.stdout.write("\033[2J\033[H")         # clear alternate screen
         sys.stdout.write("\033[?1049l")           # restore main screen
@@ -311,8 +309,6 @@ class Renderer:
             visible_rows = max(1, list_height // card_height)
             total_rows = len(state.podcasts)
             start_row = max(0, min(total_rows - visible_rows, state.podcast_cursor - visible_rows // 2))
-            visible_pids: set[int] = set()
-
             for vr in range(visible_rows):
                 pod_idx = start_row + vr
                 if pod_idx >= len(state.podcasts):
@@ -321,7 +317,6 @@ class Renderer:
                 img_bytes = state.cover_images.get(pid)
                 if not img_bytes:
                     continue
-                visible_pids.add(pid)
 
                 # Terminal position: row 1=header, row 2=panel border, row 3=panel content.
                 # Card top border at row 3 + vr*card_height → thumbnail at +1.
@@ -330,33 +325,17 @@ class Renderer:
                 term_col = 4
                 cursor_seq = f"\033[{term_row};{term_col}H"
 
-                if img_mod.protocol_name() == "kitty":
-                    if self._kitty_card_cache.get(pid) is img_bytes:
-                        # Already transmitted this exact image — just reposition it.
-                        image_overlay += cursor_seq + img_mod.kitty_redisplay(
-                            CARD_THUMB_W, CARD_THUMB_H, kitty_id=pid
-                        )
-                    else:
-                        # Need to (re)transmit — only if preencoded sequence is ready.
-                        cached = self._img_seq_cache.get(pid)
-                        if cached and cached[0] is img_bytes:
-                            if pid in self._kitty_card_cache:
-                                image_overlay += img_mod.kitty_delete(pid)
-                            image_overlay += cursor_seq + cached[1]
-                            self._kitty_card_cache[pid] = img_bytes
-                        # else: PIL not done yet — skip this frame; next render will show it.
-                else:  # iTerm2 / sixel: retransmit each frame from preencoded cache only.
-                    cached = self._img_seq_cache.get(pid)
-                    if cached and cached[0] is img_bytes:
-                        image_overlay += cursor_seq + cached[1]
-                    # else: PIL not done yet — skip this frame.
-
-            # Evict Kitty slots for podcasts no longer in the visible window.
-            if img_mod.protocol_name() == "kitty":
-                stale = [k for k in self._kitty_card_cache if k not in visible_pids]
-                for stale_pid in stale:
-                    image_overlay += img_mod.kitty_delete(stale_pid)
-                    del self._kitty_card_cache[stale_pid]
+                # Re-transmit the image every frame from the pre-encoded cache.
+                # We cannot reuse an already-transmitted Kitty image (a=p) because the
+                # per-frame ESC[2J clear deletes all stored images per the Kitty graphics
+                # spec — Ghostty honours this strictly (real kitty does not, which is why
+                # the old redisplay optimization only worked there). Re-sending the full
+                # a=T sequence each frame is what the iTerm2/sixel paths already do; it is
+                # atomic inside the surrounding BSU block, so there is no visible flicker.
+                cached = self._img_seq_cache.get(pid)
+                if cached and cached[0] is img_bytes:
+                    image_overlay += cursor_seq + cached[1]
+                # else: PIL not done yet — skip this frame; next render will show it.
 
         sys.stdout.write(
             "\033[?2026h"

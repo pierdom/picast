@@ -119,21 +119,13 @@ def _to_png(image_bytes: bytes, px: int = 256) -> bytes:
     return buf.getvalue()
 
 
-def kitty_redisplay(cols: int, rows: int, kitty_id: int = _KITTY_IMG_ID) -> str:
-    """Re-place an already-transmitted Kitty image (no data transfer)."""
-    return f"\033_Ga=p,q=2,i={kitty_id},c={cols},r={rows}\033\\"
-
-
-def kitty_delete(kitty_id: int = _KITTY_IMG_ID) -> str:
-    """Delete a Kitty image from terminal cache by ID."""
-    return f"\033_Ga=d,q=2,i={kitty_id}\033\\"
-
-
 def _render_kitty(image_bytes: bytes, cols: int, rows: int, kitty_id: int = _KITTY_IMG_ID) -> str:
     """Kitty terminal graphics protocol — APC escape (ESC_G...ESC\\).
 
-    Transmits the image with the given ID so subsequent frames can use
-    kitty_redisplay() instead of retransmitting the full PNG data.
+    Transmits the image with a=T (transmit + display). The renderer re-sends this
+    sequence every frame: the per-frame ESC[2J clear deletes all stored images per
+    the Kitty graphics spec (Ghostty honours this strictly), so re-placing an
+    already-transmitted image with a=p is not reliable across terminals.
     """
     try:
         png = _to_png(image_bytes)
