@@ -76,6 +76,10 @@ class Renderer:
         self._lock = threading.Lock()   # guards render() vs exit_screen() stdout race
         self._exiting = False
         self._thumb_dims: tuple[int, int] | None = None
+        # Tracks Kitty images currently on screen: pid → (term_row, term_col, img_bytes)
+        # Used to avoid ESC[2J per-frame clears that cause flicker on Ghostty.
+        self._displayed_kitty: dict[int, tuple[int, int, bytes]] = {}
+        self._prev_frame_size: tuple[int, int] = (0, 0)
 
     def _thumb_cells(self) -> tuple[int, int]:
         """Largest cell box that renders the cover *square* in pixels, within the card.
@@ -109,6 +113,11 @@ class Renderer:
                 )
                 if lines:
                     self._img_seq_cache[pid] = (image_bytes, lines[0])
+                else:
+                    # Protocol encoding failed (e.g. unsupported image format) —
+                    # fall back to half-block so the card shows something.
+                    hb = img_mod.render_half_block_lines(image_bytes, cols, rows)
+                    self._half_block_cache[pid] = self._pad_block(hb, cols, rows)
         else:
             if pid not in self._half_block_cache:
                 lines = img_mod.render_half_block_lines(image_bytes, cols, rows)
@@ -158,6 +167,7 @@ class Renderer:
         if img_mod.protocol_name() == "kitty":
             sys.stdout.write("\033_Ga=d,d=a,q=2\033\\")  # delete all Kitty images
             self._img_seq_cache.clear()
+            self._displayed_kitty.clear()
         sys.stdout.write("\033[2J\033[H")         # clear alternate screen
         sys.stdout.write("\033[?1049l")           # restore main screen
         sys.stdout.write("\033[?25h")             # show cursor (after screen restore)
@@ -197,8 +207,16 @@ class Renderer:
         for stale_id in [k for k in self._half_block_cache if k not in current_ids]:
             del self._half_block_cache[stale_id]
 
-        # Pass blank images when protocol is active so cards reserve space for overlay.
-        display_images = {} if use_protocol else self._half_block_cache
+        # Protocol-active cards get blank placeholder cells; the image is overlaid after.
+        # Exception: podcasts where protocol encoding failed use a half-block fallback
+        # rendered directly in the card (they won't appear in the Kitty overlay loop).
+        if use_protocol:
+            display_images = {
+                pid: lines for pid, lines in self._half_block_cache.items()
+                if pid in current_ids
+            }
+        else:
+            display_images = self._half_block_cache
 
         # ── left panel content (podcast cards) ───────────────────────────────
         import time as _time
@@ -340,6 +358,17 @@ class Renderer:
         frame = "\r\n".join(cap.get().split("\n")[:rows])
 
         # ── protocol image overlay for card thumbnails ────────────────────────
+        proto_name = img_mod.protocol_name()
+
+        # On terminal resize, re-transmit all Kitty images at updated positions.
+        # We don't clear _img_seq_cache here because preprocess_image is only called
+        # on image fetch, so clearing would leave images blank with no async re-trigger.
+        if (cols, rows) != self._prev_frame_size:
+            self._prev_frame_size = (cols, rows)
+            self._thumb_dims = None  # force cell-size ratio recompute
+            self._displayed_kitty.clear()  # force re-transmit at new positions
+
+        delete_seqs = ""
         image_overlay = ""
         if use_protocol and state.podcasts:
             card_height = CARD_THUMB_H + 2   # border-top + thumb_h rows + border-bottom
@@ -350,6 +379,9 @@ class Renderer:
             img_cols, img_rows = self._thumb_cells()
             row_off = (CARD_THUMB_H - img_rows) // 2
             col_off = (CARD_THUMB_W - img_cols) // 2
+
+            # Compute the desired image positions for this frame.
+            desired: dict[int, tuple[int, int, bytes]] = {}
             for vr in range(visible_rows):
                 pod_idx = start_row + vr
                 if pod_idx >= len(state.podcasts):
@@ -358,29 +390,46 @@ class Renderer:
                 img_bytes = state.cover_images.get(pid)
                 if not img_bytes:
                     continue
-
+                cached = self._img_seq_cache.get(pid)
+                if not (cached and cached[0] is img_bytes):
+                    continue  # PIL not done yet — skip; next render will pick it up
                 # Terminal position: row 1=header, row 2=panel border, row 3=panel content.
                 # Card top border at row 3 + vr*card_height → thumbnail at +1, then center.
                 term_row = HEADER_HEIGHT + vr * card_height + 3 + row_off
                 # Column: panel border(1) + panel padding(1) + card border(1) + 1-indexed = 4
                 term_col = 4 + col_off
-                cursor_seq = f"\033[{term_row};{term_col}H"
+                desired[pid] = (term_row, term_col, img_bytes)
 
-                # Re-transmit the image every frame from the pre-encoded cache.
-                # We cannot reuse an already-transmitted Kitty image (a=p) because the
-                # per-frame ESC[2J clear deletes all stored images per the Kitty graphics
-                # spec — Ghostty honours this strictly (real kitty does not, which is why
-                # the old redisplay optimization only worked there). Re-sending the full
-                # a=T sequence each frame is what the iTerm2/sixel paths already do; it is
-                # atomic inside the surrounding BSU block, so there is no visible flicker.
-                cached = self._img_seq_cache.get(pid)
-                if cached and cached[0] is img_bytes:
-                    image_overlay += cursor_seq + cached[1]
-                # else: PIL not done yet — skip this frame; next render will show it.
+            if proto_name == "kitty":
+                # Targeted deletes for images that moved, changed, or scrolled off.
+                # This avoids ESC[2J which wipes all Kitty images and causes a blank-
+                # screen flash every frame on Ghostty (which honours the spec strictly).
+                for pid, old_info in self._displayed_kitty.items():
+                    if desired.get(pid) != old_info:
+                        delete_seqs += f"\033_Ga=d,d=i,i={pid},q=2\033\\"
+                # Transmit only images that are new or have moved/changed.
+                for pid, (term_row, term_col, img_bytes) in desired.items():
+                    if self._displayed_kitty.get(pid) != (term_row, term_col, img_bytes):
+                        image_overlay += f"\033[{term_row};{term_col}H" + self._img_seq_cache[pid][1]
+                self._displayed_kitty = dict(desired)
+            else:
+                # iTerm2 / sixel: re-transmit every frame (simpler; ESC[2J doesn't
+                # carry the same image-deletion behaviour as Ghostty's Kitty impl).
+                for pid, (term_row, term_col, img_bytes) in desired.items():
+                    image_overlay += f"\033[{term_row};{term_col}H" + self._img_seq_cache[pid][1]
+
+        # For Kitty we skip ESC[2J to preserve images not deleted above — the Rich
+        # frame fully overwrites the text layer starting from ESC[H, so no stale
+        # text survives. Other protocols keep the traditional full-screen clear.
+        if proto_name == "kitty":
+            screen_init = "\033[H\033[?25l"
+        else:
+            screen_init = "\033[2J\033[H\033[?25l"
 
         sys.stdout.write(
             "\033[?2026h"
-            + "\033[2J\033[H\033[?25l"
+            + delete_seqs
+            + screen_init
             + frame
             + image_overlay
             + "\033[?2026l"
