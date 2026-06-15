@@ -12,9 +12,8 @@ from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 
+from picast.ui import theme
 from picast.ui.theme import (
-    ACCENT,
-    ACCENT_DIM,
     BG_SELECT,
     BORDER_COLOR,
     DONE_COLOR,
@@ -22,12 +21,9 @@ from picast.ui.theme import (
     FG,
     FG_DIM,
     FOLLOW_ICON,
-    NEW_COLOR,
     NEW_ICON,
     PAUSED_ICON,
-    PLAYING_COLOR,
     PLAYING_ICON,
-    STARTED_COLOR,
     STARTED_ICON,
     UNFOLLOW_ICON,
 )
@@ -54,9 +50,9 @@ def _fmt_date(ts: int) -> str:
 
 def _status_icon(status: str) -> tuple[str, str]:
     return {
-        "started": (STARTED_ICON, STARTED_COLOR),
+        "started": (STARTED_ICON, theme.STARTED_COLOR),
         "completed": (DONE_ICON, DONE_COLOR),
-    }.get(status, (NEW_ICON, NEW_COLOR))
+    }.get(status, (NEW_ICON, theme.NEW_COLOR))
 
 
 # ── podcast card (2-column grid) ──────────────────────────────────────────────
@@ -125,7 +121,7 @@ def _podcast_card(
         remaining = text_w - len(truncated)
         if remaining > 2:
             title_text.append(" " * (remaining - 2))
-            title_text.append(FOLLOW_ICON, style=Style(color=ACCENT))
+            title_text.append(FOLLOW_ICON, style=Style(color=theme.ACCENT))
             title_text.append(" ")
     else:
         title_text.append(title, style=Style(color=FG, bold=True))
@@ -153,7 +149,7 @@ def _podcast_card(
     if pub_ts:
         meta_t.append(_fmt_date(pub_ts), style=Style(color=FG_DIM))
     if pub_ts and (now - pub_ts) < _NEW_EPISODE_SECS:
-        meta_t.append("  ● NEW", style=Style(color=NEW_COLOR, bold=True))
+        meta_t.append("  ● NEW", style=Style(color=theme.NEW_COLOR, bold=True))
 
     text_lines: list[Text] = [title_text, author_text] + desc_texts + [meta_t]
 
@@ -172,9 +168,9 @@ def _podcast_card(
         grid.add_row(img_cell, Text(""), text_lines[i] if i < len(text_lines) else Text(""))
 
     if is_playing:
-        border_style = PLAYING_COLOR
+        border_style = theme.PLAYING_COLOR
     elif is_selected:
-        border_style = ACCENT
+        border_style = theme.ACCENT
     else:
         border_style = BORDER_COLOR
 
@@ -293,9 +289,9 @@ def podcast_list_content(
             label = " Following"
             dashes = "─" * max(0, title_w - len(label))
             t = Text(no_wrap=True)
-            t.append(label, style=Style(color=ACCENT, bold=True))
-            t.append(dashes, style=Style(color=ACCENT_DIM))
-            table.add_row(Text(FOLLOW_ICON, style=Style(color=ACCENT, bold=True)), t, Text(""))
+            t.append(label, style=Style(color=theme.ACCENT, bold=True))
+            t.append(dashes, style=Style(color=theme.ACCENT_DIM))
+            table.add_row(Text(FOLLOW_ICON, style=Style(color=theme.ACCENT, bold=True)), t, Text(""))
 
         elif kind == "spacer":
             table.add_row(Text(""), Text(""), Text(""))
@@ -335,7 +331,7 @@ def podcast_list_content(
             is_followed = feed_id in following_ids
 
             icon = FOLLOW_ICON if is_followed else " "
-            icon_style = Style(color=ACCENT) if is_followed else Style(color=FG_DIM)
+            icon_style = Style(color=theme.ACCENT) if is_followed else Style(color=FG_DIM)
             name = p.get("title", f"Feed {feed_id}")
             row_style = Style(bgcolor=BG_SELECT) if is_selected else Style()
             name_style = Style(color=FG, bold=True) if is_selected else Style(color=FG)
@@ -344,7 +340,7 @@ def podcast_list_content(
             if is_followed:
                 pub_ts = p.get("newestItemPubdate", 0) or 0
                 if pub_ts and (now - pub_ts) < _NEW_EPISODE_SECS:
-                    badge_t = Text("NEW", style=Style(color=NEW_COLOR, bold=True))
+                    badge_t = Text("NEW", style=Style(color=theme.NEW_COLOR, bold=True))
 
             table.add_row(
                 Text(icon, style=icon_style),
@@ -423,7 +419,7 @@ def episode_list_content(
         dot, dot_color = _status_icon(status)
         if is_playing:
             dot = PLAYING_ICON
-            dot_color = PLAYING_COLOR
+            dot_color = theme.PLAYING_COLOR
 
         title = ep.get("title", f"Episode {ep_id}")
         date_str = _fmt_date(ep.get("datePublished", 0))
@@ -494,7 +490,7 @@ def detail_content(
         lines.append(Text(author, style=Style(color=FG_DIM, italic=True), overflow="fold"))
 
     follow_label = f" {FOLLOW_ICON} Following" if is_following else f" {UNFOLLOW_ICON} Follow [f]"
-    lines.append(Text(follow_label, style=Style(color=ACCENT if is_following else FG_DIM)))
+    lines.append(Text(follow_label, style=Style(color=theme.ACCENT if is_following else FG_DIM)))
     lines.append(Text("─" * image_cols, style=Style(color=BORDER_COLOR)))
 
     if loading:
@@ -529,7 +525,7 @@ def player_content(
     dur_str = _fmt_dur(int(duration)) if duration else "?:??"
 
     title_t = Text(no_wrap=True, overflow="ellipsis")
-    title_t.append(f" {icon} ", style=Style(color=PLAYING_COLOR, bold=True))
+    title_t.append(f" {icon} ", style=Style(color=theme.PLAYING_COLOR, bold=True))
     if podcast_title:
         title_t.append(f"{podcast_title}  ", style=Style(color=FG_DIM))
     title_t.append(ep_title, style=Style(color=FG))
@@ -540,7 +536,7 @@ def player_content(
     frac = min(1.0, position / duration) if duration > 0 else 0.0
     filled = int(frac * bar_width)
     bar_t = Text(no_wrap=True)
-    bar_t.append("█" * filled, style=Style(color=PLAYING_COLOR))
+    bar_t.append("█" * filled, style=Style(color=theme.PLAYING_COLOR))
     bar_t.append("░" * (bar_width - filled), style=Style(color=BORDER_COLOR))
 
     return Group(title_t, bar_t)
@@ -551,13 +547,13 @@ def player_content(
 def hints_line(search_mode: bool = False, query: str = "") -> Text:
     t = Text(no_wrap=True, overflow="ellipsis")
     if search_mode:
-        t.append(" / ", style=Style(color=ACCENT, bold=True))
+        t.append(" / ", style=Style(color=theme.ACCENT, bold=True))
         t.append(query, style=Style(color=FG))
-        t.append("█", style=Style(color=ACCENT))
+        t.append("█", style=Style(color=theme.ACCENT))
         t.append("  Enter=search  Esc=cancel", style=Style(color=FG_DIM))
         return t
 
-    _chip = Style(color="#0f172a", bgcolor=ACCENT_DIM, bold=True)
+    _chip = Style(color="#0f172a", bgcolor=theme.ACCENT_DIM, bold=True)
     _lbl = Style(color=FG_DIM)
     _sep = Style(color=BORDER_COLOR)
 
@@ -578,6 +574,7 @@ def hints_line(search_mode: bool = False, query: str = "") -> Text:
     chip("←→");   lbl("seek");       sep()
     chip("/");     lbl("search");     sep()
     chip("f");     lbl("follow");     sep()
+    chip("t");     lbl("theme");      sep()
     chip("Tab");   lbl("toggle");     sep()
     chip("q");     lbl("quit")
     return t

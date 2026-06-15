@@ -69,6 +69,7 @@ class Renderer:
     def __init__(self) -> None:
         self._console: Console | None = None
         self._console_size: tuple[int, int] = (0, 0)
+        self._console_theme_name: str = ""
         self._half_block_cache: dict[int, list[str]] = {}
         # pid → (img_bytes_ref, preencoded_escape_sequence)
         self._img_seq_cache: dict[int, tuple[bytes, str]] = {}
@@ -128,8 +129,10 @@ class Renderer:
         return out[:CARD_THUMB_H]
 
     def _get_console(self, cols: int, rows: int) -> Console:
-        if (cols, rows) != self._console_size:
+        active_theme = theme.get_theme_name()
+        if (cols, rows) != self._console_size or active_theme != self._console_theme_name:
             self._console_size = (cols, rows)
+            self._console_theme_name = active_theme
             self._console = Console(
                 force_terminal=True,
                 width=cols,

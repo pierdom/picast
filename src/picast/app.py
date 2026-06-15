@@ -9,6 +9,7 @@ from pathlib import Path
 
 from picast import config, store
 from picast.api import PodcastIndexAPI
+from picast.ui import theme
 from picast.keys import (
     BACKSPACE,
     BACKTAB,
@@ -65,6 +66,10 @@ class App:
         if not api_key or not api_secret:
             print("No credentials — exiting.", file=sys.stderr)
             return
+
+        cfg = config.load()
+        if saved_theme := cfg.get("theme"):
+            theme.set_theme(saved_theme)
 
         self._running = True
         self._render_event = asyncio.Event()
@@ -200,6 +205,12 @@ class App:
                 await self._switch_pane(1)
             case k if k == BACKTAB:
                 await self._switch_pane(-1)
+            case k if k == "t":
+                name = theme.next_theme()
+                cfg = config.load()
+                cfg["theme"] = name
+                config.save(cfg)
+                self.state.status = f"Theme: {name}"
 
     async def _handle_search_key(self, key: str) -> None:
         if key == ESCAPE:
