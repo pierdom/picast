@@ -225,6 +225,8 @@ class App:
                 cfg["theme"] = name
                 config.save(cfg)
                 self.state.status = f"Theme: {name}"
+            case k if k == "r":
+                asyncio.ensure_future(self._refresh())
 
     async def _handle_mouse(self, event: MouseEvent) -> None:
         try:
@@ -524,6 +526,20 @@ class App:
             await self._on_podcast_cursor_change()
 
     # ── podcast/episode loading ───────────────────────────────────────────────
+
+    async def _refresh(self) -> None:
+        """Force-reload all follow metadata and the current episode list."""
+        self.state.status = "Refreshing…"
+        self._mark_dirty()
+        await self._load_following_home()
+        if self._api:
+            for p in list(self.state.podcasts):
+                asyncio.ensure_future(self._refresh_follow_metadata(p))
+        if self.state.selected_podcast and self._api:
+            pid = self.state.selected_podcast.get("id", 0)
+            self.state.episodes_for_pod = None  # force reload
+            asyncio.ensure_future(self._load_episodes_now(self.state.selected_podcast, pid))
+        asyncio.ensure_future(self._clear_status())
 
     async def _load_following_home(self) -> None:
         """Load followed podcasts as the home screen."""

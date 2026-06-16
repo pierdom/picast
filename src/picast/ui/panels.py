@@ -579,6 +579,7 @@ def hints_line(search_mode: bool = False, query: str = "") -> Text:
     chip("/");     lbl("search");     sep()
     chip("f");     lbl("follow");     sep()
     chip("t");     lbl("theme");      sep()
+    chip("r");     lbl("refresh");    sep()
     chip("Tab");   lbl("toggle");     sep()
     chip("q");     lbl("quit")
     return t
