@@ -499,6 +499,8 @@ class App:
         if self.state.view == "podcast":
             # Return to card grid without clearing episodes (smooth UX)
             self.state.view = "home"
+        elif self.state.view == "search":
+            await self._load_following_home()
 
     async def _go_right(self) -> None:
         if self.state.view in ("home", "following", "search"):
