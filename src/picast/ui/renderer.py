@@ -19,6 +19,7 @@ from rich.console import Console, Group
 from rich.layout import Layout
 from rich.panel import Panel
 from rich.style import Style
+from rich.table import Table
 from rich.text import Text
 
 from picast import image as img_mod
@@ -323,18 +324,23 @@ class Renderer:
         )
 
         # ── header bar ────────────────────────────────────────────────────────
-        header = Text(no_wrap=True)
         badge = Style(bold=True, color="#ffffff", bgcolor=theme.ACCENT_DIM)
-        header.append(" ▶ picast ", style=badge)
+        header_left = Text(no_wrap=True, overflow="ellipsis")
+        header_left.append(" ▶ picast ", style=badge)
         if state.now_playing_episode:
             ep_icon = theme.PLAYING_ICON if state.is_playing else theme.PAUSED_ICON
             ep_title = state.now_playing_episode.get("title", "")[:45]
-            header.append("   │   ", style=Style(color=theme.BORDER_COLOR))
-            header.append(f"{ep_icon} ", style=Style(color=theme.PLAYING_COLOR, bold=True))
-            header.append(ep_title, style=Style(color=theme.FG_DIM))
-
+            header_left.append("   │   ", style=Style(color=theme.BORDER_COLOR))
+            header_left.append(f"{ep_icon} ", style=Style(color=theme.PLAYING_COLOR, bold=True))
+            header_left.append(ep_title, style=Style(color=theme.FG_DIM))
         if state.status:
-            header.append(f"  {state.status}", style=Style(color=theme.WARNING))
+            header_left.append(f"  {state.status}", style=Style(color=theme.WARNING))
+
+        header_right = Text(" ↺ ", style=badge, no_wrap=True)
+        header = Table.grid(padding=0, expand=True)
+        header.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
+        header.add_column(width=3, no_wrap=True)
+        header.add_row(header_left, header_right)
 
         # ── assemble layout ───────────────────────────────────────────────────
         layout = Layout()

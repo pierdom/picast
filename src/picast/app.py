@@ -239,9 +239,12 @@ class App:
         left_allocated = (cols - 1) * LEFT_RATIO // (LEFT_RATIO + RIGHT_RATIO)
         player_top = HEADER_HEIGHT + main_height + 1
 
-        if event.row >= player_top:
+        if event.row <= HEADER_HEIGHT:
+            if event.action == "press" and event.col >= cols - 2:
+                asyncio.ensure_future(self._refresh())
+        elif event.row >= player_top:
             self._handle_mouse_player(event, cols, main_height, player_top)
-        elif event.row > HEADER_HEIGHT:
+        else:
             if event.col <= left_allocated:
                 await self._handle_mouse_left(event, main_height)
             elif event.col > left_allocated + 1:
