@@ -366,6 +366,7 @@ def episode_list_content(
     height: int = 20,
     has_focus: bool = True,
     width: int = 40,
+    player_paused: bool = False,
 ) -> Table:
     table = Table.grid(padding=(0, 0))
     table.add_column(width=2)  # dot + space
@@ -418,8 +419,12 @@ def episode_list_content(
 
         dot, dot_color = _status_icon(status)
         if is_playing:
-            dot = PLAYING_ICON
-            dot_color = theme.PLAYING_COLOR
+            if player_paused:
+                dot = PAUSED_ICON
+                dot_color = theme.ACCENT_DIM
+            else:
+                dot = PLAYING_ICON
+                dot_color = theme.PLAYING_COLOR
 
         title = ep.get("title", f"Episode {ep_id}")
         date_str = _fmt_date(ep.get("datePublished", 0))
@@ -519,13 +524,12 @@ def player_content(
             Text(""),
         )
 
-    icon = PLAYING_ICON if is_playing else PAUSED_ICON
     ep_title = episode.get("title", "")
     pos_str = _fmt_dur(int(position)) or "0:00"
     dur_str = _fmt_dur(int(duration)) if duration else "?:??"
 
     title_t = Text(no_wrap=True, overflow="ellipsis")
-    title_t.append(f" {icon} ", style=Style(color=theme.PLAYING_COLOR, bold=True))
+    title_t.append("  ", style=Style())
     if podcast_title:
         title_t.append(f"{podcast_title}  ", style=Style(color=FG_DIM))
     title_t.append(ep_title, style=Style(color=FG))

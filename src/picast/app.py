@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 import sys
 import time
@@ -18,6 +19,7 @@ from picast.keys import (
     ENTER,
     ESCAPE,
     LEFT,
+    MouseEvent,
     RIGHT,
     SPACE,
     TAB,
@@ -25,7 +27,16 @@ from picast.keys import (
     KeyReader,
 )
 from picast.player import MpvPlayer
-from picast.ui.renderer import Renderer, RenderState
+from picast.ui.panels import _DESC_MAX_LINES, _strip_html, _word_wrap
+from picast.ui.renderer import (
+    CARD_THUMB_H,
+    HEADER_HEIGHT,
+    LEFT_RATIO,
+    PLAYER_HEIGHT,
+    RIGHT_RATIO,
+    Renderer,
+    RenderState,
+)
 
 
 # How long a stored follow's metadata stays fresh before we re-fetch it.
@@ -123,10 +134,10 @@ class App:
             await asyncio.sleep(0.016)  # batch rapid updates, cap at ~60 fps
 
     async def _key_loop(self) -> None:
-        async for key in self.keys:
+        async for event in self.keys:
             if not self._running:
                 break
-            await self._handle_key(key)
+            await self._handle_key(event)
             self._mark_dirty()
 
     async def _player_poll_loop(self) -> None:
@@ -163,7 +174,10 @@ class App:
 
     # ── key handling ──────────────────────────────────────────────────────────
 
-    async def _handle_key(self, key: str) -> None:
+    async def _handle_key(self, key: str | MouseEvent) -> None:
+        if isinstance(key, MouseEvent):
+            await self._handle_mouse(key)
+            return
         if key == CTRL_C or (key == "q" and not self.state.search_mode):
             self._request_stop()
             return
@@ -211,6 +225,162 @@ class App:
                 cfg["theme"] = name
                 config.save(cfg)
                 self.state.status = f"Theme: {name}"
+
+    async def _handle_mouse(self, event: MouseEvent) -> None:
+        try:
+            sz = os.get_terminal_size()
+            cols, rows = sz.columns, sz.lines
+        except OSError:
+            cols, rows = 80, 24
+
+        main_height = max(6, rows - HEADER_HEIGHT - PLAYER_HEIGHT)
+        left_allocated = (cols - 1) * LEFT_RATIO // (LEFT_RATIO + RIGHT_RATIO)
+        player_top = HEADER_HEIGHT + main_height + 1
+
+        if event.row >= player_top:
+            self._handle_mouse_player(event, cols, main_height, player_top)
+        elif event.row > HEADER_HEIGHT:
+            if event.col <= left_allocated:
+                await self._handle_mouse_left(event, main_height)
+            elif event.col > left_allocated + 1:
+                await self._handle_mouse_right(event, main_height, left_allocated, cols)
+
+    def _handle_mouse_player(
+        self, event: MouseEvent, cols: int, main_height: int, player_top: int
+    ) -> None:
+        if event.action != "press":
+            return
+        if not self.player.running:
+            return
+        if event.row == player_top:
+            self._handle_space()
+            return
+        if self.state.playback_duration <= 0:
+            return
+        bar_row = player_top + 2  # top_border + title_line + bar
+        if event.row != bar_row:
+            return
+        bar_width = max(10, cols - 4)
+        click_col = event.col - 3  # 0-indexed within bar (border=1 + padding=1 → offset 2, then 1-indexed → -3+1)
+        if 0 <= click_col < bar_width:
+            frac = click_col / bar_width
+            self.player.seek_abs(frac * self.state.playback_duration)
+
+    async def _handle_mouse_left(self, event: MouseEvent, main_height: int) -> None:
+        if event.action in ("scroll_up", "scroll_down"):
+            delta = -1 if event.action == "scroll_up" else 1
+            n = len(self.state.podcasts)
+            if n:
+                self.state.podcast_cursor = max(0, min(n - 1, self.state.podcast_cursor + delta))
+                await self._on_podcast_cursor_change()
+            return
+
+        if event.action != "press":
+            return
+
+        podcasts = self.state.podcasts
+        if not podcasts:
+            return
+
+        card_height = CARD_THUMB_H + 2
+        list_height = main_height - 2
+        visible_rows = max(1, list_height // card_height)
+        total_rows = len(podcasts)
+        cursor = self.state.podcast_cursor
+        start_row = max(0, min(total_rows - visible_rows, cursor - visible_rows // 2))
+
+        inner_row = event.row - HEADER_HEIGHT - 2  # 0-indexed inner panel row
+        if inner_row < 0:
+            return
+        vr = inner_row // card_height
+        pod_idx = start_row + vr
+        if pod_idx >= total_rows:
+            return
+
+        if self.state.view == "podcast":
+            self.state.view = "home"
+            self.state.podcast_cursor = pod_idx
+            await self._on_podcast_cursor_change()
+        elif pod_idx == self.state.podcast_cursor:
+            await self._handle_enter()
+        else:
+            self.state.podcast_cursor = pod_idx
+            await self._on_podcast_cursor_change()
+
+    async def _handle_mouse_right(
+        self, event: MouseEvent, main_height: int, left_allocated: int, cols: int
+    ) -> None:
+        if event.action in ("scroll_up", "scroll_down"):
+            delta = -1 if event.action == "scroll_up" else 1
+            n = len(self.state.episodes)
+            if n:
+                self.state.episode_cursor = max(0, min(n - 1, self.state.episode_cursor + delta))
+            return
+
+        if event.action != "press":
+            return
+
+        if not self.state.episodes:
+            return
+
+        if self.state.view != "podcast":
+            await self._go_right()
+            return
+
+        list_height = main_height - 2
+        right_allocated = (cols - 1) - left_allocated
+        right_inner = right_allocated - 4
+        desc_width = max(10, right_inner - 2 - 2)
+        max_desc = max(0, min(_DESC_MAX_LINES, list_height - 2))
+
+        cursor = self.state.episode_cursor
+        episodes = self.state.episodes
+        n = len(episodes)
+
+        desc_lines_count = 0
+        if max_desc and 0 <= cursor < n:
+            raw = (episodes[cursor].get("description", "") or "").strip()
+            desc = _strip_html(raw)
+            if desc:
+                desc_lines_count = len(_word_wrap(desc, desc_width, max_desc))
+
+        def ep_height(idx: int) -> int:
+            return 2 + (desc_lines_count if idx == cursor else 0)
+
+        start = cursor
+        end = cursor + 1
+        used = ep_height(cursor)
+        while True:
+            grew = False
+            if start > 0 and used + ep_height(start - 1) <= list_height:
+                start -= 1
+                used += ep_height(start)
+                grew = True
+            if end < n and used + ep_height(end) <= list_height:
+                used += ep_height(end)
+                end += 1
+                grew = True
+            if not grew:
+                break
+
+        inner_row = event.row - HEADER_HEIGHT - 2  # 0-indexed inner panel row
+        if inner_row < 0:
+            return
+        current_row = 0
+        for idx in range(start, end):
+            h = ep_height(idx)
+            if inner_row < current_row + h:
+                if idx == self.state.episode_cursor:
+                    ep_id = episodes[idx].get("id")
+                    now_id = self.state.now_playing_episode.get("id") if self.state.now_playing_episode else None
+                    if ep_id and ep_id == now_id and self.player.running:
+                        self._handle_space()
+                    else:
+                        self._play_episode(episodes[idx])
+                else:
+                    self.state.episode_cursor = idx
+                break
+            current_row += h
 
     async def _handle_search_key(self, key: str) -> None:
         if key == ESCAPE:

@@ -153,16 +153,18 @@ class Renderer:
         return self._console  # type: ignore[return-value]
 
     def enter_screen(self) -> None:
-        sys.stdout.write("\033[?1049h")          # alternate screen
-        sys.stdout.write("\033[?25l")            # hide cursor
-        sys.stdout.write("\033[2J\033[H")        # clear + top-left
+        sys.stdout.write("\033[?1049h")            # alternate screen
+        sys.stdout.write("\033[?25l")              # hide cursor
+        sys.stdout.write("\033[2J\033[H")          # clear + top-left
+        sys.stdout.write("\033[?1000h\033[?1006h") # mouse button events + SGR encoding
         sys.stdout.flush()
-        img_mod._detect()                        # re-probe now that stdout is a real tty
+        img_mod._detect()                          # re-probe now that stdout is a real tty
 
     def exit_screen(self) -> None:
         with self._lock:
             self._exiting = True
-        sys.stdout.write("\033[?2026l")           # close any open BSU
+        sys.stdout.write("\033[?1006l\033[?1000l") # disable mouse
+        sys.stdout.write("\033[?2026l")            # close any open BSU
         sys.stdout.write("\033[0m")               # reset SGR (colors, bold, etc.)
         if img_mod.protocol_name() == "kitty":
             sys.stdout.write("\033_Ga=d,d=a,q=2\033\\")  # delete all Kitty images
@@ -277,6 +279,7 @@ class Renderer:
             height=list_height,
             has_focus=state.view == "podcast",
             width=right_inner - 2,  # minus the 2-col status-dot column
+            player_paused=playing_ep_id is not None and not state.is_playing,
         )
 
         right_panel = Panel(
